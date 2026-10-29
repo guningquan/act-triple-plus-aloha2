@@ -5,7 +5,10 @@ import h5py
 import argparse
 
 import matplotlib.pyplot as plt
-from constants import DT
+try:
+    from aloha_scripts.constants import DT
+except ImportError:
+    from constants import DT
 
 import IPython
 e = IPython.embed

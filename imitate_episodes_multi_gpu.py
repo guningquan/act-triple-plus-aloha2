@@ -20,13 +20,14 @@ from utils import load_data # data functions
 from utils import sample_box_pose, sample_insertion_pose # robot functions
 from utils import compute_dict_mean, set_seed, detach_dict, calibrate_linear_vel, postprocess_base_action # helper functions
 from policy import ACTPolicy, CNNMLPPolicy, DiffusionPolicy, TactileACTPolicy, ACTNormalsPolicy
-from visualize_episodes import save_videos
+from aloha_scripts.visualize_episodes_multi import save_videos
 from utils import calculate_weights_exponential, calculate_weights_aloha, calculate_weights_gaussian, apply_weights_to_all_l1, calculate_weighted_action
 from detr.models.latent_model import Latent_Model_Transformer
 
 # from sim_env import BOX_POSE
 try:
-    from aloha_scripts.sleep_plus import sleep_puppet_robots
+    from aloha_scripts.sleep_plus import sleep_puppet_robots, shut_down_puppet_robots
+    from aloha_scripts.one_side_teleop import KeyboardControl
 except ImportError:
     pass
 
@@ -410,6 +411,10 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
         # env = make_real_env(init_node=True, setup_robots=True, setup_base=True)
         env = make_real_env(init_node=True)
         env_max_reward = 0
+        # RIGHT = start, ESC/q = stop and power off, LEFT = abort this rollout and go back to
+        # waiting for RIGHT (env.reset() below already walks the puppets to START_ARM_POSE, i.e.
+        # "home", so re-entering the wait loop is all a LEFT needs to do - see the rollout loop).
+        keyboard = KeyboardControl()
     else:
         from sim_env import make_sim_env
         env = make_sim_env(task_name)
@@ -428,11 +433,29 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
 
     episode_returns = []
     highest_rewards = []
-    for rollout_id in range(num_rollouts):
-        # if real_robot:  # gnq comment
-        #     e()   # @gnq
-        input(f"Press Enter to start the {rollout_id} manipulation...")  # @gnq
-        rollout_id += 0
+    quit_requested = False
+    rollout_id = 0
+    while rollout_id < num_rollouts:
+        if real_robot:
+            if not keyboard.enabled:
+                print(f"No tty on stdin: starting the {rollout_id} manipulation immediately.")
+            else:
+                print(f"Press RIGHT to start the {rollout_id} manipulation "
+                      f"(ESC/q = stop and power off).")
+                keyboard.drain()
+                started = False
+                while not started:
+                    for event in keyboard.poll():
+                        if event == "right":
+                            started = True
+                        elif event == "esc":
+                            quit_requested = True
+                            started = True
+                    time.sleep(0.02)
+            if quit_requested:
+                break
+        else:
+            input(f"Press Enter to start the {rollout_id} manipulation...")  # @gnq
         ### set task
         if 'sim_transfer_cube' in task_name:
             BOX_POSE[0] = sample_box_pose() # used in sim reset
@@ -457,6 +480,7 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
         qpos_list = []
         target_qpos_list = []
         rewards = []
+        interrupt = None  # None | "quit" (ESC/q) | "reset" (LEFT) - set inside the loop below
         # if use_actuator_net:
         #     norm_episode_all_base_actions = [actuator_norm(np.zeros(history_len, 2)).tolist()]
         with torch.inference_mode():
@@ -464,6 +488,14 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
             DT = 1 / FPS
             culmulated_delay = 0 
             for t in range(max_timesteps):
+                if real_robot:
+                    for event in keyboard.poll():
+                        if event == "esc":
+                            interrupt = "quit"
+                        elif event == "left":
+                            interrupt = "reset"
+                    if interrupt is not None:
+                        break
                 time1 = time.time()
                 ### update onscreen render and wait for DT
                 if onscreen_render:
@@ -683,6 +715,18 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
 
             print(f'Avg fps {max_timesteps / (time.time() - time0)}')
             plt.close()
+
+        if interrupt == "quit":
+            print("ESC/q: stopping. Opening grippers and moving puppets to the sleep position...")
+            shut_down_puppet_robots()
+            print("Puppets are at the sleep position with torque off.")
+            break
+        if interrupt == "reset":
+            print("Reset: re-homing for the next attempt...")
+            ts = env.reset()
+            print(f"At home. Press RIGHT to start the {rollout_id} manipulation again.")
+            continue
+
         if real_robot:
             move_grippers([env.puppet_bot_left, env.puppet_bot_right], [PUPPET_LEFT_GRIPPER_JOINT_OPEN, PUPPET_RIGHT_GRIPPER_JOINT_OPEN], move_time=0.5)  # open
             sleep_puppet_robots()  # @gnq
@@ -716,6 +760,11 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
             t = threading.Thread(target=save_videos, args=(image_list, DT, video_path))
             t.start()
             t.join()
+
+        rollout_id += 1
+
+    if real_robot:
+        keyboard.close()
 
     success_rate = np.mean(np.array(highest_rewards) == env_max_reward)
     avg_return = np.mean(episode_returns)

@@ -5,7 +5,7 @@
 
 import os
 if os.getlogin() == 'guningquan':
-    DATA_DIR = '/mnt/ssd1/guningquan/Programs_server/act_dataset_checkpoint/dataset'
+    DATA_DIR = '/mnt/ssd2/guningquan/Dataset'
 elif os.getlogin() == 'ubuntu20':
     DATA_DIR = '/home/robot/Dataset_and_Checkpoint/dataset'
 else:
@@ -129,7 +129,7 @@ TASK_CONFIGS = {
         },
 
 
-            'packaging': {
+    'packaging': {
         'dataset_dir': DATA_DIR + '/packaging',
         'episode_len': 3000,
         'camera_names': ['cam_high',
@@ -138,13 +138,52 @@ TASK_CONFIGS = {
                          'cam_right_wrist',
                          ]
     },
+    
+    'packaging_move_box': {
+        'dataset_dir': DATA_DIR + '/packaging_move_box',
+        'episode_len': 1500,
+        'camera_names': ['cam_high',
+                         'cam_low',
+                         'cam_left_wrist',
+                         'cam_right_wrist',
+                         ]
+    },
 
+    'packaging_simple': {
+    'dataset_dir': DATA_DIR + '/packaging_simple',
+    'episode_len': 2500,
+    'camera_names': ['cam_high',
+                        # 'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
+    'packaging_simple_2': {
+    'dataset_dir': DATA_DIR + '/packaging_simple_2',
+    'episode_len': 2500,
+    'camera_names': ['cam_high',
+                        # 'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
+    'packaging_simple_2_plus': {
+    'dataset_dir': DATA_DIR + '/packaging_simple_2_plus',
+    'episode_len': 2500,
+    'camera_names': ['cam_high',
+                        # 'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
 }
 
 
 ### ALOHA fixed constants
 DT = 0.02
-FPS = 50
+FPS = round(1 / DT)  # derived from DT, not a separate literal - imitate_episodes_multi_gpu.py uses this as DT = 1/FPS
 
 JOINT_NAMES = ["waist", "shoulder", "elbow", "forearm_roll", "wrist_angle", "wrist_rotate"]
 START_ARM_POSE = [0, -0.96, 1.16, 0, -0.3, 0, 0.02239, -0.02239,  0, -0.96, 1.16, 0, -0.3, 0, 0.02239, -0.02239]

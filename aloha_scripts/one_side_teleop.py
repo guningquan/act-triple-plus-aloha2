@@ -116,24 +116,42 @@ from interbotix_xs_modules.arm import InterbotixManipulatorXS
 from interbotix_xs_msgs.msg import JointSingleCommand
 from std_msgs.msg import UInt8MultiArray
 
-from constants import DT, START_ARM_POSE
-from constants import MASTER2PUPPET_LEFT_JOINT_FN, MASTER2PUPPET_RIGHT_JOINT_FN
-from constants import MASTER_LEFT_GRIPPER_JOINT_CLOSE, MASTER_LEFT_GRIPPER_JOINT_OPEN
-from constants import MASTER_RIGHT_GRIPPER_JOINT_CLOSE, MASTER_RIGHT_GRIPPER_JOINT_OPEN
-from constants import PUPPET_LEFT_GRIPPER_JOINT_CLOSE, PUPPET_LEFT_GRIPPER_JOINT_OPEN
-from constants import PUPPET_RIGHT_GRIPPER_JOINT_CLOSE, PUPPET_RIGHT_GRIPPER_JOINT_OPEN
-from robot_utils import torque_on, torque_off, move_arms, move_grippers, get_arm_gripper_positions
-# Sleep-position constants and the two-stage, correctly-timed shutdown move: shared with
-# sleep_plus.py so a change to either the measured rest pose or the shutdown speed only has to
-# be made once. See sleep_plus.py's own module comment for why these two stages exist (a hard
-# drop was observed going straight to a single "sleep" target) and why the target is a measured
-# resting pose rather than each arm model's factory-default one (inaccurate for this particular
-# pair of arms - added tactile hardware shifts the balance point).
-from sleep_plus import (
-    OLD_PUPPET_SLEEP_POSITION, OLD_MASTER_SLEEP_POSITION,
-    PUPPET_SLEEP_POSITION, MASTER_SLEEP_POSITION,
-    SHUTDOWN_SPEED_SCALE, move_shut_robot,
-)
+# Dual-mode: works both run directly (python aloha_scripts/one_side_teleop.py ..., aloha_scripts/
+# itself on sys.path, flat imports resolve) and imported as aloha_scripts.one_side_teleop from a
+# repo-root script (e.g. imitate_episodes_multi_gpu.py), where only the dotted form resolves -
+# same pattern already used by sleep_plus.py and visualize_episodes_multi.py.
+try:
+    from aloha_scripts.constants import DT, START_ARM_POSE
+    from aloha_scripts.constants import MASTER2PUPPET_LEFT_JOINT_FN, MASTER2PUPPET_RIGHT_JOINT_FN
+    from aloha_scripts.constants import MASTER_LEFT_GRIPPER_JOINT_CLOSE, MASTER_LEFT_GRIPPER_JOINT_OPEN
+    from aloha_scripts.constants import MASTER_RIGHT_GRIPPER_JOINT_CLOSE, MASTER_RIGHT_GRIPPER_JOINT_OPEN
+    from aloha_scripts.constants import PUPPET_LEFT_GRIPPER_JOINT_CLOSE, PUPPET_LEFT_GRIPPER_JOINT_OPEN
+    from aloha_scripts.constants import PUPPET_RIGHT_GRIPPER_JOINT_CLOSE, PUPPET_RIGHT_GRIPPER_JOINT_OPEN
+    from aloha_scripts.robot_utils import torque_on, torque_off, move_arms, move_grippers, get_arm_gripper_positions
+    # Sleep-position constants and the two-stage, correctly-timed shutdown move: shared with
+    # sleep_plus.py so a change to either the measured rest pose or the shutdown speed only has to
+    # be made once. See sleep_plus.py's own module comment for why these two stages exist (a hard
+    # drop was observed going straight to a single "sleep" target) and why the target is a measured
+    # resting pose rather than each arm model's factory-default one (inaccurate for this particular
+    # pair of arms - added tactile hardware shifts the balance point).
+    from aloha_scripts.sleep_plus import (
+        OLD_PUPPET_SLEEP_POSITION, OLD_MASTER_SLEEP_POSITION,
+        PUPPET_SLEEP_POSITION, MASTER_SLEEP_POSITION,
+        SHUTDOWN_SPEED_SCALE, move_shut_robot,
+    )
+except ImportError:
+    from constants import DT, START_ARM_POSE
+    from constants import MASTER2PUPPET_LEFT_JOINT_FN, MASTER2PUPPET_RIGHT_JOINT_FN
+    from constants import MASTER_LEFT_GRIPPER_JOINT_CLOSE, MASTER_LEFT_GRIPPER_JOINT_OPEN
+    from constants import MASTER_RIGHT_GRIPPER_JOINT_CLOSE, MASTER_RIGHT_GRIPPER_JOINT_OPEN
+    from constants import PUPPET_LEFT_GRIPPER_JOINT_CLOSE, PUPPET_LEFT_GRIPPER_JOINT_OPEN
+    from constants import PUPPET_RIGHT_GRIPPER_JOINT_CLOSE, PUPPET_RIGHT_GRIPPER_JOINT_OPEN
+    from robot_utils import torque_on, torque_off, move_arms, move_grippers, get_arm_gripper_positions
+    from sleep_plus import (
+        OLD_PUPPET_SLEEP_POSITION, OLD_MASTER_SLEEP_POSITION,
+        PUPPET_SLEEP_POSITION, MASTER_SLEEP_POSITION,
+        SHUTDOWN_SPEED_SCALE, move_shut_robot,
+    )
 
 DEFAULT_ARM_COMMAND_MOVE_TIME = DT
 DEFAULT_PREP_ARM_MOVE_TIME = 2.0
