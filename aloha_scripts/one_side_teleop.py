@@ -301,6 +301,13 @@ class KeyboardControl:
                 elif code == b"D":
                     events.append("left")
                 continue
+            if len(self._buffer) >= 2 and self._buffer[1:2] not in (b"[", b"O"):
+                # ESC followed by anything else (ESC then another key within the hold-off, Alt+key)
+                # is a real ESC. Without this branch nothing here consumed the ESC, so the loop broke
+                # on it at every poll and every later key - ESC included - was ignored for good.
+                self._buffer = self._buffer[1:]
+                events.append("esc")
+                continue
             if len(self._buffer) == 1 and time.time() - self._buffer_time > self.ESC_HOLDOFF_S:
                 self._buffer = b""
                 events.append("esc")

@@ -66,16 +66,6 @@ TASK_CONFIGS = {
     },
 
 
-    'aloha2_test': {
-        'dataset_dir': DATA_DIR + '/aloha2_test',
-        'episode_len': 1600,
-        'camera_names': ['cam_high',
-                         'cam_low',
-                         'cam_left_wrist',
-                         'cam_right_wrist',
-                         ]
-    },
-
     'aloha2_tactile_test': {
     'dataset_dir': DATA_DIR + '/aloha2_tactile_test',
     'episode_len': 1600,

@@ -14,6 +14,9 @@
 | `replay_episodes.py` | 读取一条 HDF5 的 `/action`，在真实 puppet 手臂上原样回放 |
 | `visualize_episodes_multi.py` | 离线画一条 HDF5 的 qpos/qvel/effort/action 曲线和相机帧，不碰机械臂 |
 | `run_vtla_policy.py` | 连接远端 N0-VTLA 策略服务器，在真机上跑推理闭环 |
+| `run_pi_policy.py` | 连接远端 openpi 策略服务器，在真机上纯推理验证（不接管、不录制），见 `README_run_robot.md` |
+| `hil_rollout.py` | 连接远端 openpi / N0 策略服务器，离合式人工接管 + 录制 HIL 数据，见 `README_run_robot.md` |
+| `hil_split_episodes.py` | 把 HIL episode 切成只含接管段的 episode，见 `README_hil.md` |
 | `constants.py` | 全局常量：任务配置表 `TASK_CONFIGS`、夹爪开合角度、`START_ARM_POSE` 等 |
 | `robot_utils.py` | 被其他脚本调用的底层工具函数库，不单独运行 |
 

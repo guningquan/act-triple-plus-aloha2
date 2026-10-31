@@ -188,8 +188,13 @@ def write_csv(path, columns, rows):
 
 
 def export_episode(destination, samples, models, sources, task, *, overwrite=False, calibration=None,
-                   action_space="eef"):
-    """Publish a complete episode directory only after CSV/video validation succeeds."""
+                   action_space="eef", extra_csvs=None, extra_metadata=None):
+    """Publish a complete episode directory only after CSV/video validation succeeds.
+
+    extra_csvs: {key: (columns, values)} with one row of `values` per source sample, resampled
+    with the same indices as every other CSV and written to <key>/data.csv (hil_rollout.py's
+    per-tick labels). extra_metadata is merged into metadata.json.
+    """
     if action_space not in ("eef", "joint_position"):
         raise ValueError("Unsupported ALOHA action space: {}".format(action_space))
     destination = Path(destination)
@@ -210,6 +215,11 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
     if action_space == "eef":
         csv_specs.extend([("observation.state.eef_pose", EEF_COLS, joints_to_eef(state, models)),
                           ("actions.eef_pose", EEF_COLS, joints_to_eef(action, models))])
+    for key, (cols, values) in (extra_csvs or {}).items():
+        values = np.asarray(values)
+        if len(values) != len(samples):
+            raise ValueError("extra CSV {} needs one row per sample".format(key))
+        csv_specs.append((key, tuple(cols), values[indices]))
     destination.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="." + destination.name + "-", dir=str(destination.parent)) as temporary:
         root = Path(temporary) / "complete"
@@ -303,6 +313,7 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
                 "rotation_representation": "rot6d: concatenate R[:,0], R[:,1]",
                 "kinematics": [{"M": np.asarray(model.M).tolist(), "Slist": np.asarray(model.Slist).tolist()} for model in models],
             })
+        metadata.update(extra_metadata or {})
         (root / "metadata.json").write_text(json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         # If an explicit overwrite fails, restore the previous complete episode.
         backup = Path(temporary) / "previous"

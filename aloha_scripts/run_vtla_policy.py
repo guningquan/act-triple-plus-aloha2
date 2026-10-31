@@ -25,10 +25,10 @@ Wire protocol
 -------------
 websocket + msgpack, numpy arrays packed as {"__ndarray__": True, "data", "dtype", "shape"}.
 This is byte-for-byte what openpi_client/n0vtla_client speak (see their websocket_client_policy.py
-+ msgpack_numpy.py), reimplemented here in ~40 lines instead of depending on either package: this
-script runs under the ROS box's system Python 3.8, which has no reason to carry jax/torch just to
-pack a dict over a socket. Needs `pip3 install websockets` (msgpack is already a dependency of
-the tactile stack elsewhere in this repo).
++ msgpack_numpy.py), reimplemented in policy_client.py (shared with hil_rollout.py) instead of
+depending on either package: this script runs under the ROS box's system Python 3.8, which has no
+reason to carry jax/torch just to pack a dict over a socket. Needs websockets + msgpack (both in
+the `aloha` conda env).
 
 --action_space is REQUIRED (no default) and must match how the CONNECTED CHECKPOINT was
 trained - it picks both the wire shape/dimensionality sent and how the returned action is
@@ -123,17 +123,16 @@ at the wrong speed relative to what the model's dynamics were conditioned on.
 
 import argparse
 import logging
-import struct
 import time
 
 import cv2
-import msgpack
 import numpy as np
 
 from constants import (PUPPET_LEFT_GRIPPER_JOINT_OPEN, PUPPET_LEFT_GRIPPER_JOINT_UNNORMALIZE_FN,
                       PUPPET_RIGHT_GRIPPER_JOINT_OPEN, PUPPET_RIGHT_GRIPPER_JOINT_UNNORMALIZE_FN,
                       START_ARM_POSE)
 from one_side_teleop import KeyboardControl
+from policy_client import PolicyClient
 from real_env import make_real_env
 from robot_utils import move_arms, move_grippers
 from sleep_plus import shut_down_puppet_robots
@@ -167,81 +166,6 @@ JOINT_LAYOUT = {
     "right_joints": slice(7, 13), "right_gripper": 13,
 }
 STALE_STREAM_S = 0.5  # refuse to act on a camera/tactile frame older than this
-
-
-# --------------------------------------------------------------------------------------------
-# Minimal msgpack-numpy + websocket client: wire-compatible with openpi_client/n0vtla_client
-# without importing either (see module docstring "Wire protocol").
-# --------------------------------------------------------------------------------------------
-
-def _pack_array(obj):
-    # Wrapper-dict keys are bytes literals, not str, on purpose: msgpack's "bin" wire type
-    # always round-trips as python bytes regardless of the unpacker's `raw` setting, while a
-    # str key's wire type ("str") decodes to str or bytes depending on that setting and on the
-    # msgpack-python version's default. n0vtla_client/openpi_client's own msgpack_numpy.py
-    # builds this same dict with bytes keys for exactly that reason - match it exactly, or a
-    # server pinned to a different msgpack-python version silently fails to recognise the
-    # wrapper and hands the model a raw {"data":...,"dtype":...} dict instead of an ndarray.
-    if isinstance(obj, np.ndarray):
-        if obj.dtype.kind in ("V", "O", "c"):
-            raise ValueError("Unsupported dtype for the wire: {}".format(obj.dtype))
-        return {b"__ndarray__": True, b"data": obj.tobytes(), b"dtype": obj.dtype.str, b"shape": list(obj.shape)}
-    if isinstance(obj, np.generic):
-        return {b"__npgeneric__": True, b"data": obj.item(), b"dtype": obj.dtype.str}
-    return obj
-
-
-def _unpack_array(obj):
-    if b"__ndarray__" in obj or "__ndarray__" in obj:
-        data = obj.get(b"data", obj.get("data"))
-        dtype = obj.get(b"dtype", obj.get("dtype"))
-        shape = obj.get(b"shape", obj.get("shape"))
-        return np.ndarray(buffer=data, dtype=np.dtype(dtype), shape=tuple(shape))
-    if b"__npgeneric__" in obj or "__npgeneric__" in obj:
-        data = obj.get(b"data", obj.get("data"))
-        dtype = obj.get(b"dtype", obj.get("dtype"))
-        return np.dtype(dtype).type(data)
-    return obj
-
-
-class PolicyClient:
-    """Blocking websocket client for the n0vtla/openpi WebsocketPolicyServer protocol.
-
-    On connect the server sends one packed metadata dict; after that every send/recv pair is
-    one inference. `websockets.sync.client` gives us a plain blocking socket - no asyncio needed
-    for a single-threaded 30 Hz control loop.
-    """
-
-    def __init__(self, host, port, connect_timeout_s=30.0):
-        import websockets.sync.client as ws_client
-
-        uri = host if host.startswith("ws") else "ws://{}".format(host)
-        if port is not None:
-            uri = "{}:{}".format(uri, port)
-        deadline = time.monotonic() + connect_timeout_s
-        last_error = None
-        while time.monotonic() < deadline:
-            try:
-                self._ws = ws_client.connect(uri, compression=None, max_size=None)
-                break
-            except (ConnectionRefusedError, OSError) as exc:
-                last_error = exc
-                logging.info("Waiting for policy server at %s ...", uri)
-                time.sleep(2.0)
-        else:
-            raise RuntimeError("Could not connect to policy server at {}: {}".format(uri, last_error))
-        self.metadata = msgpack.unpackb(self._ws.recv(), object_hook=_unpack_array, raw=False)
-
-    def infer(self, obs):
-        packed = msgpack.packb(obs, default=_pack_array, use_bin_type=True)
-        self._ws.send(packed)
-        response = self._ws.recv()
-        if isinstance(response, str):
-            raise RuntimeError("Policy server error:\n{}".format(response))
-        return msgpack.unpackb(response, object_hook=_unpack_array, raw=False)
-
-    def close(self):
-        self._ws.close()
 
 
 # --------------------------------------------------------------------------------------------
@@ -486,13 +410,20 @@ def build_observation(action_space, streams, sources, prompt, max_age, state, ta
       joint -> vtla_joint_posttrain / FlexivTactileInputs: nested {images, tactile, state, prompt}.
     """
     frames = streams.snapshot(max_age)
+    return observation_from_frames(action_space, frames, streams.tactile_names, sources, prompt, state,
+                                   tactile_baseline)
+
+
+def observation_from_frames(action_space, frames, tactile_names, sources, prompt, state, tactile_baseline):
+    """build_observation() on already-captured true-RGB frames ({source name: HWC uint8}), so
+    hil_rollout.py (via policy_client.N0VtlaAdapter) sends the exact same wire layout."""
     state = np.asarray(state, dtype=np.float32)
 
     if action_space == "joint":
         images, tactile = {}, {}
         for key, source in sources.items():
             short = key[len("observation.image."):]
-            if source in streams.tactile_names:
+            if source in tactile_names:
                 # index 0 = baseline T_0, index 1 = current T_t - see module docstring.
                 tactile[short] = np.stack([tactile_baseline[source], frames[source]], axis=0)
             else:
@@ -501,7 +432,7 @@ def build_observation(action_space, streams, sources, prompt, max_age, state, ta
 
     obs = {}
     for key, source in sources.items():
-        if source in streams.tactile_names:
+        if source in tactile_names:
             obs[key] = np.stack([tactile_baseline[source], frames[source]], axis=0)
         else:
             obs[key] = frames[source]
