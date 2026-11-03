@@ -4,6 +4,7 @@
 # DATA_DIR = '/home/ubuntu20/guningquan/Programs_Codes/aloha_related/Dataset_and_Checkpoint/dataset'
 
 import os
+
 if os.getlogin() == 'guningquan':
     DATA_DIR = '/mnt/ssd2/guningquan/Dataset'
 elif os.getlogin() == 'ubuntu20':
@@ -168,8 +169,39 @@ TASK_CONFIGS = {
                         'cam_right_wrist',
                         ]
     },
-}
 
+    'packaging2': {
+    'dataset_dir': DATA_DIR + '/packaging2',
+    'episode_len': 4000,
+    'camera_names': ['cam_high',
+                        'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
+    'dual_picking': {
+    'dataset_dir': DATA_DIR + '/dual_picking',
+    'episode_len': 4000,
+    'camera_names': ['cam_high',
+                        'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
+    'itigo_picking': {
+    'dataset_dir': DATA_DIR + '/itigo_picking',
+    'episode_len': 2000,
+    'camera_names': ['cam_high',
+                        'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
+
+}
 
 ### ALOHA fixed constants
 DT = 0.02

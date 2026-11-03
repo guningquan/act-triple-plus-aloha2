@@ -196,6 +196,25 @@ python3 aloha_scripts/hil_split_episodes.py \
   /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil_corrections --keep intervention
 ```
 
+### 转成视频看一眼
+
+转换/训练之前，先把某一条 `episode_N.hdf5` 转成带标注的视频，直观看一下哪些是机器自己跑的、哪些是人接管的：
+
+```bash
+python3 aloha_scripts/hil_episode_to_video.py \
+  /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil/episode_0.hdf5 \
+  /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil/episode_0_annotated.mp4
+```
+
+每个摄像头画面并排拼接，边框颜色标出当前状态（终端也会打印同样的统计和分段时间表）：
+
+- 绿色 `AUTONOMOUS` — 策略自己在跑（`hil/phase == 0`）
+- 黄色 `PAUSED` — 策略暂停，等待决策（`hil/phase == 1`）
+- 深红 `CORRECTING` — 已经进入接管流程，但还在前 `--correction_skip_s` 内，暂不计入 intervention（`hil/phase == 2` 且 `hil/intervention == 0`）
+- 亮红 `HUMAN` — 人类正在实际接管，真正算作 intervention 的那部分（`hil/intervention == 1`）
+
+`--fps` 可指定输出帧率（默认 50，即 `hil_rollout.py` 的采集频率）。普通（非 HIL）的 `record_episodes_aloha2.py` 录制也能喂给这个脚本，只是整段都会标成 `AUTONOMOUS`。
+
 ---
 
 ## 4. 常用参数（`hil_rollout.py`；`run_pi_policy.py` 的参数见第 2 节和 `--help`）

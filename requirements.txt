@@ -16,3 +16,16 @@ ipython
 segmentation_models_pytorch
 huggingface_hub==0.24.7
 wandb
+numpy
+msgpack
+websockets
+Pillow
+modern_robotics
+dm_env
+h5py_cache
+evdev
+diffusers
+visualpriors
+pandas
+seaborn
+pytest
