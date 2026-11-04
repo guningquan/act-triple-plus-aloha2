@@ -74,12 +74,23 @@ python3 aloha_scripts/hil_rollout.py --task_name aloha2_tactile_test --policy n0
 
 ```
 自主（主臂锁住）──→──▶ 暂停：从臂保持，主臂在 --align_s（2.0s）内移到从臂位置
-暂停 ──←──▶ 主臂 P 增益在 --release_ramp_s（0.3s）内降到 0 → 断扭矩 → 恢复增益 → 力反馈开启
-        → 等主臂稳定（--settle_s 0.2s 内每个关节变化 < --settle_tolerance 0.01rad，最多 --settle_timeout_s 1.0s）
+暂停 ──←──▶ 主臂 P 增益在 --release_ramp_s（0.5s）内降到 0 → 断扭矩 → 恢复增益 → 力反馈开启
+        → 等主臂稳定（--settle_s 0.5s 内每个关节变化 < --settle_tolerance 0.01rad，最多 --settle_timeout_s 2.0s）
         → offset = 主臂 - 从臂 → 接管：从臂 = 主臂 - offset（夹爪绝对值）；--correction_blend_s 默认 0（不缓入，第一条指令本来就等于保持的指令）
 接管 ──←──▶ 主臂锁住、offset 清零 → 暂停          暂停 ──→──▶ 自主（--resume_blend_s，默认 0）
 ```
 
+- 按 ← 之后到接管开始之前，进度条那一行（仍是黄色 `paused`）会显示准备进度，只显示两只主臂里更慢的那一只：
+  - `releasing [██████░░░░] 7/12`：主臂正在变软（P 增益渐降），还不用动手。
+  - `settling [████░░░░░░] steady 0.20/0.50s | move 0.014/0.010 rad (R elbow) | wait 0.6/2.0s`：手放稳。
+    `steady` 是所有关节连续保持在 `--settle_tolerance` 以内的时间，涨到 `--settle_s` 就记 offset 并开始接管；
+    某个关节变化超过 `--settle_tolerance` 时进度条清零，并标出是哪只手臂的哪个关节（`move` 为 `--settle_s` 窗口内最大变化，
+    所以你停手后它要再过约 `--settle_s` 才回到阈值以下，这期间进度条在涨，属正常）；
+    `wait` 是已等待时间，到 `--settle_timeout_s` 不再等，直接记 offset（日志里会写 `settle timeout`）。
+  - 默认 `--settle_s 0.5` / `--settle_timeout_s 2.0`：0.2s 的窗口太短，进度条几乎看不出变化；超时必须不小于 `--settle_s`，
+    否则机器人开场动作做完后才会报 `ValueError`。变红之前你动的部分会被吸收进 offset，从臂不会跟着动，所以先稳住再操作。
+  - 颜色：这一段一直是黄色系，变红才表示已开始接管；绿色、红色不用于这个进度条（绿＝策略在跑，红＝你在接管）。
+  - 只是显示，不影响控制逻辑，也不影响保存的数据。
 - 每次接管的前 `--correction_skip_s`（0.2s）照常录制，但不标记为 intervention。
 - 默认值与 lerobot 版命令一致（blend 0、skip 0.2、ramp 0.3）。打开缓入时从从臂上一条指令开始，不从实测位置开始（避免从臂先下沉）。
 - 主臂变软时的寄存器写入在每条主臂自己的后台线程里执行：两条臂并行，控制循环不等待。

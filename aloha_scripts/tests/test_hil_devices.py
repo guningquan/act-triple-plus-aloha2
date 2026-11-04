@@ -90,7 +90,7 @@ def test_settle_timeout_when_the_operator_keeps_moving():
 
 def test_lock_clears_offset_aims_goal_at_present_pose_then_torques_on():
     bot, clock, haptics = FakeBot(follow_commands=False), FakeClock(), FakeHaptics()
-    leader = make_leader(bot, "left", release_ramp_s=0.0, haptics=haptics, control_dt=DT)
+    leader = make_leader(bot, "left", release_ramp_s=0.0, settle_s=0.2, haptics=haptics, control_dt=DT)
     leader.reference = bot.arm_position()
     leader.begin_release(clock.now)
     run_ticks(leader, clock, 0.3)

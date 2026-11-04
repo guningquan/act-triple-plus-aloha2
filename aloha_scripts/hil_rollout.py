@@ -38,6 +38,7 @@ hil_split_episodes.py turns them into corrections-only (or autonomous-only) epis
 
 import argparse
 import logging
+import sys
 import time
 from pathlib import Path
 
@@ -47,6 +48,54 @@ from chunk_executor import ChunkExecutor, PolicyError
 from hil_recorder import PHASE_AUTONOMOUS, PHASE_CORRECTING, PHASE_PAUSED
 
 PHASE_NAMES = {PHASE_AUTONOMOUS: "autonomous", PHASE_PAUSED: "paused", PHASE_CORRECTING: "correcting"}
+# Progress-line colour by phase: green while the policy drives, yellow while paused/waiting for a
+# decision, red once a human has taken over (PHASE_CORRECTING - the followers are tracking the
+# leaders). ANSI_PHASE colours the phase word in the postfix text (bold + bright SGR codes, not the
+# dim/dull standard 30-37 ANSI hues most terminal themes render for plain "green"/"yellow"); tqdm's
+# own `colour=` bar-fill knob is given the same hues as saturated truecolor hex instead of the named
+# "green"/"yellow" (which map to those same dull standard codes), so the bar and the text match and
+# both actually look green/yellow/red instead of olive/muddy.
+ANSI_RESET = "\033[0m"
+ANSI_PHASE = {PHASE_AUTONOMOUS: "\033[1;92m", PHASE_PAUSED: "\033[1;93m", PHASE_CORRECTING: "\033[1;91m"}
+TQDM_PHASE_COLOUR = {PHASE_AUTONOMOUS: "#00FF00", PHASE_PAUSED: "#FFFF00", PHASE_CORRECTING: "#FF0000"}
+
+# Take-over preparation (leaders releasing / settling) is still PHASE_PAUSED, so it stays in the yellow family:
+# bright-yellow bar fill, dim empty part. Green and red are left out on purpose - they already mean "the policy
+# drives" and "you are live" - the line turns red only when the correction really starts.
+ANSI_PREPARE = "\033[93m"
+ANSI_DIM = "\033[2m"
+ANSI_BOLD = "\033[1m"
+PREPARE_BAR_WIDTH = 10
+PREPARE_REFRESH_S = 0.05  # redraw period of the preparation line (a paused tqdm bar is otherwise redrawn on events only)
+
+
+def _bar_chars():
+    """Block characters when stdout can print them (tqdm falls back the same way), else ASCII."""
+    try:
+        "█░".encode(sys.stdout.encoding or "ascii")
+        return "█", "░"
+    except (UnicodeEncodeError, LookupError):
+        return "#", "-"
+
+
+def format_takeover_progress(shot, chars=None):
+    """One preparation snapshot (ClutchLeaderPair.takeover_progress) as the text for the progress line:
+        releasing [██████░░░░] 7/12
+        settling [████░░░░░░] steady 0.08/0.20s | move 0.014/0.010 rad (R elbow) | wait 0.4/1.0s
+    The bar fills while the leader stays within tolerance and empties as soon as a joint moves; the
+    moving joint is named only while it is over the tolerance."""
+    fill, empty = chars or _bar_chars()
+    filled = int(round(max(0.0, min(1.0, shot["share"])) * PREPARE_BAR_WIDTH))
+    bar = "[{}{}{}{}{}{}]".format(ANSI_PREPARE, fill * filled, ANSI_RESET, ANSI_DIM,
+                                  empty * (PREPARE_BAR_WIDTH - filled), ANSI_RESET)
+    if shot["stage"] == "releasing":
+        text = "releasing " + bar
+        return text + " {}/{}".format(shot["done"], shot["steps"]) if shot["steps"] else text
+    move = "{:.3f}/{:.3f} rad".format(shot["span"], shot["tolerance"])
+    if shot["span"] > shot["tolerance"]:
+        move = ANSI_BOLD + move + ANSI_RESET + " ({} {})".format(shot["side"][0].upper(), shot["joint_name"])
+    return "settling {} steady {:.2f}/{:.2f}s | move {} | wait {:.1f}/{:.1f}s".format(
+        bar, shot["steady_s"], shot["need_s"], move, shot["elapsed_s"], shot["timeout_s"])
 
 
 class StaleStream(RuntimeError):
@@ -95,12 +144,14 @@ class HilSession:
         self._limit_warned = False
         self._bar = None
         self._last_stale_warning = 0.0
+        self._last_prepare_refresh = float("-inf")
 
     # -- transitions -----------------------------------------------------------------------------
 
     def _pause(self, now, reason):
         self.executor.reset()
         self.phase = PHASE_PAUSED
+        self._update_progress()
         hold = self.follower.current()
         self.leaders.begin_move(hold, self.align_s, now)
         self._say("Paused ({}): followers hold, leaders moving onto them. LEFT = take over, RIGHT = resume."
@@ -111,6 +162,7 @@ class HilSession:
         self.executor.reset()
         self.follower.begin_blend(self.resume_blend_s)
         self.phase = PHASE_AUTONOMOUS
+        self._update_progress()
         self._say("Resumed: policy driving.")
 
     def _start_correction(self):
@@ -118,12 +170,14 @@ class HilSession:
         self.phase = PHASE_CORRECTING
         self.correction_ticks = 0
         self.corrections += 1
+        self._update_progress()
         self.follower.begin_blend(self.correction_blend_s)
         self._say("Correcting (#{}): followers follow the leaders. LEFT = hand back.".format(self.corrections))
 
     def _end_correction(self):
         self.leaders.lock()
         self.phase = PHASE_PAUSED
+        self._update_progress()
         if self.active_steps >= self.max_steps:
             self.end_reason = "max_steps"
             return
@@ -193,6 +247,8 @@ class HilSession:
                 self.releasing = True
             if self.releasing and self.leaders.released:
                 self._start_correction()
+            elif self.releasing:
+                self._refresh_takeover_progress(now)
 
         if self.phase == PHASE_AUTONOMOUS:
             try:
@@ -218,7 +274,7 @@ class HilSession:
             self.active_steps += 1
             if self._bar is not None:
                 self._bar.update(1)
-        if self._bar is not None and self.steps % 10 == 0:
+        if self.steps % 10 == 0:
             self._update_progress()
         if self.active_steps >= self.max_steps:
             if self.phase != PHASE_CORRECTING:
@@ -237,14 +293,30 @@ class HilSession:
         else:
             print(message)
 
-    def _update_progress(self):
-        status = "{} | rec {} | corr {}".format(PHASE_NAMES[self.phase], len(self.recorder), self.corrections)
+    def _refresh_takeover_progress(self, now):
+        """Redraw the preparation line now (the paused phase never calls bar.update), at most every
+        PREPARE_REFRESH_S."""
+        if self._bar is None or now - self._last_prepare_refresh < PREPARE_REFRESH_S - 1e-9:
+            return
+        self._last_prepare_refresh = now
+        self._update_progress(refresh=True)
+
+    def _update_progress(self, refresh=False):
+        if self._bar is None:
+            return
+        phase_word = ANSI_PHASE[self.phase] + PHASE_NAMES[self.phase] + ANSI_RESET
+        shot = self.leaders.takeover_progress() if self.releasing else None
+        parts = [phase_word]
+        if shot is not None:
+            parts.append(format_takeover_progress(shot))
+        parts += ["rec {}".format(len(self.recorder)), "corr {}".format(self.corrections)]
         latencies = getattr(self.executor, "latencies", None)
-        if latencies:
-            status += " | infer {:.0f} ms".format(1000 * latencies[-1])
+        if latencies and shot is None:
+            parts.append("infer {:.0f} ms".format(1000 * latencies[-1]))
         if self.phase == PHASE_CORRECTING:
-            status += " | offset {:.3f}".format(float(np.abs(self.leaders.offsets()).max()))
-        self._bar.set_postfix_str(status, refresh=False)
+            parts.append("offset {:.3f}".format(float(np.abs(self.leaders.offsets()).max())))
+        self._bar.colour = TQDM_PHASE_COLOUR[self.phase]
+        self._bar.set_postfix_str(" | ".join(parts), refresh=refresh)
 
     def run(self):
         """Run until e/ESC or the time limit; returns "end", "esc" or "max_steps". The leaders are
@@ -321,10 +393,12 @@ def build_parser():
     hil.add_argument("--absolute_takeover", action="store_true",
                      help="Disable the clutch offset (follower jumps to the leader's absolute pose)")
     hil.add_argument("--align_s", type=float, default=2.0, help="Leader move onto the followers on pause")
-    hil.add_argument("--release_ramp_s", type=float, default=0.3, help="Leader P-gain ramp to 0 before torque off")
-    hil.add_argument("--settle_s", type=float, default=0.2)
-    hil.add_argument("--settle_tolerance", type=float, default=0.01)
-    hil.add_argument("--settle_timeout_s", type=float, default=1.0)
+    hil.add_argument("--release_ramp_s", type=float, default=0.5, help="Leader P-gain ramp to 0 before torque off")
+    hil.add_argument("--settle_s", type=float, default=0.5,
+                     help="Leader must stay within --settle_tolerance for this long before the offset is taken")
+    hil.add_argument("--settle_tolerance", type=float, default=0.01, help="rad, per joint, within the settle window")
+    hil.add_argument("--settle_timeout_s", type=float, default=2.0,
+                     help="Longest wait for the leader to settle (must be >= --settle_s); then the offset is taken anyway")
     hil.add_argument("--max_offset_warn", type=float, default=0.25)
     hil.add_argument("--correction_blend_s", type=float, default=0.0,
                      help="Follower ease-in at correction start, from its last command (0: none - with the clutch "

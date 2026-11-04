@@ -61,6 +61,7 @@ PUPPET_GRIPPER_UNNORMALIZE = {"left": PUPPET_LEFT_GRIPPER_JOINT_UNNORMALIZE_FN,
 P_GAIN_STEP_S = 0.04  # one Position_P_Gain write per arm every this many seconds while releasing
 ALIGN_MAX_SPEED = 1.0  # rad/s: the leader alignment takes at least (largest joint distance) / this
 MIN_P_GAIN = 100  # a leader gain below this means an earlier run was killed mid-release
+SETTLE_FRACTION = 0.9  # a settled window only needs this share of settle_s: tick jitter must not cost one more tick
 
 
 def _smoothstep(t):
@@ -70,8 +71,8 @@ def _smoothstep(t):
 class ClutchLeader:
     LOCKED, MOVING, RELEASING, SETTLING, FREE = "locked", "moving", "releasing", "settling", "free"
 
-    def __init__(self, bot, side, release_ramp_s=0.3, relative=True, settle_s=0.2, settle_tolerance=0.01,
-                 settle_timeout_s=1.0, max_offset_warn=0.25, haptics=None, control_dt=DT, io_executor=None):
+    def __init__(self, bot, side, release_ramp_s=0.5, relative=True, settle_s=0.5, settle_tolerance=0.01,
+                 settle_timeout_s=2.0, max_offset_warn=0.25, haptics=None, control_dt=DT, io_executor=None):
         if side not in SIDES:
             raise ValueError("side must be 'left' or 'right'")
         if release_ramp_s < 0 or settle_s <= 0 or settle_tolerance <= 0 or settle_timeout_s < settle_s:
@@ -98,6 +99,7 @@ class ClutchLeader:
         self._ramp = None
         self._window = []
         self._settle_start = None
+        self._settle_stats = None  # numbers behind takeover_progress() while settling
         # Register writes (Position_P_Gain, torque) are ROS service calls - with per-joint gains 6 per
         # step. They run on this arm's own worker thread, so the control loop never waits for them
         # and the two leaders release in parallel.
@@ -248,6 +250,7 @@ class ClutchLeader:
         if self.relative and self.reference is not None:
             self._window = []
             self._settle_start = now
+            self._settle_stats = {"steady_s": 0.0, "span": 0.0, "joint": 0, "elapsed_s": 0.0}
             self.state = self.SETTLING
         else:
             self.state = self.FREE
@@ -256,8 +259,12 @@ class ClutchLeader:
         arm, _ = self.read()
         self._window = [(t, q) for t, q in self._window if now - t <= self.settle_s] + [(now, arm)]
         span = np.ptp(np.stack([q for _, q in self._window]), axis=0)
-        settled = now - self._window[0][0] >= self.settle_s * 0.9 and bool((span <= self.settle_tolerance).all())
+        settled = (now - self._window[0][0] >= self.settle_s * SETTLE_FRACTION
+                   and bool((span <= self.settle_tolerance).all()))
         timed_out = now - self._settle_start >= self.settle_timeout_s
+        joint = int(np.argmax(span))
+        self._settle_stats = {"steady_s": now - self._steady_since(), "span": float(span[joint]), "joint": joint,
+                              "elapsed_s": now - self._settle_start}
         if self.haptics is not None:
             self.haptics.update()
         if not (settled or timed_out):
@@ -273,6 +280,42 @@ class ClutchLeader:
             logging.warning(message + " - leader and follower poses differ visibly; pause to re-align.")
         else:
             logging.info(message)
+
+    def _steady_since(self):
+        """Time of the oldest reading of the newest run in which every joint stayed within
+        settle_tolerance (the window holds at most settle_s of readings)."""
+        low = high = None
+        since = self._window[-1][0]
+        for stamp, arm in reversed(self._window):
+            low = arm if low is None else np.minimum(low, arm)
+            high = arm if high is None else np.maximum(high, arm)
+            if bool((high - low > self.settle_tolerance).any()):
+                break
+            since = stamp
+        return since
+
+    def _joint_name(self, joint):
+        names = getattr(getattr(self.bot.arm, "group_info", None), "joint_names", None) or ()
+        return names[joint] if joint < len(names) else "joint {}".format(joint)
+
+    def takeover_progress(self):
+        """For the operator display while this leader gets ready for a take-over: None unless it is
+        releasing or settling, else a dict with "stage", "side", "share" (0..1 within the stage) and
+        the stage's numbers. Display only - nothing here feeds back into the control."""
+        if self.state == self.RELEASING and self._ramp is not None:
+            ramp = self._ramp
+            share = 1.0 if ramp["released"] else (ramp["done"] / ramp["steps"] if ramp["steps"] else 0.0)
+            return {"stage": "releasing", "side": self.side, "share": share,
+                    "done": ramp["done"], "steps": ramp["steps"]}
+        if self.state == self.SETTLING and self._settle_stats is not None:
+            stats = self._settle_stats
+            return {"stage": "settling", "side": self.side,
+                    "share": min(1.0, stats["steady_s"] / self.settle_s),
+                    "steady_s": stats["steady_s"], "need_s": self.settle_s,
+                    "span": stats["span"], "tolerance": self.settle_tolerance,
+                    "joint_name": self._joint_name(stats["joint"]),
+                    "elapsed_s": stats["elapsed_s"], "timeout_s": self.settle_timeout_s}
+        return None
 
     def lock(self):
         """Torque the leader on where it is. Ends a clutch-style correction: the offset is
@@ -367,6 +410,13 @@ class ClutchLeaderPair:
 
     def offsets(self):
         return np.concatenate([arm.offset for arm in self.arms])
+
+    def takeover_progress(self):
+        """The arm furthest from ready (still releasing before settling, then the smaller steady
+        share): the take-over only starts once both are free. None when neither is preparing."""
+        stage_order = {"releasing": 0, "settling": 1}
+        shots = [shot for shot in (arm.takeover_progress() for arm in self.arms) if shot is not None]
+        return min(shots, key=lambda shot: (stage_order[shot["stage"]], shot["share"])) if shots else None
 
 
 class FollowerCommander:
