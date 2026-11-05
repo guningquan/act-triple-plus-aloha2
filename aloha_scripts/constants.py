@@ -200,6 +200,16 @@ TASK_CONFIGS = {
                         ]
     },
 
+    'picking_w_cover': {
+    'dataset_dir': DATA_DIR + '/picking_w_cover',
+    'episode_len': 4000,
+    'camera_names': ['cam_high',
+                        'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
 
 }
 

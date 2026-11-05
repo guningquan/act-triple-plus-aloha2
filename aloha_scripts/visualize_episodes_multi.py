@@ -1,8 +1,14 @@
 import os
+# Must be set before numpy is imported. On this server (THP defrag=madvise, fragmented
+# memory) numpy's MADV_HUGEPAGE on large arrays makes page faults stall in kernel direct
+# compaction; materialising a decoded episode this way once hung for 10+ minutes.
+os.environ.setdefault('NUMPY_MADVISE_HUGEPAGE', '0')
 import numpy as np
 import cv2
 import h5py
 import argparse
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 
 import matplotlib.pyplot as plt
 try:
@@ -38,23 +44,9 @@ def load_hdf5(dataset_dir, dataset_name):
         image_dict = dict()
         for cam_name in root[f'/observations/images/'].keys():
             image_dict[cam_name] = root[f'/observations/images/{cam_name}'][()]
-        if compressed:
-            compress_len = root['/compress_len'][()]
 
-    if compressed:
-        for cam_id, cam_name in enumerate(image_dict.keys()):
-            # un-pad and uncompress
-            padded_compressed_image_list = image_dict[cam_name]
-            image_list = []
-            for frame_id, padded_compressed_image in enumerate(padded_compressed_image_list): # [:1000] to save memory
-                image_len = int(compress_len[cam_id, frame_id])
-                compressed_image = padded_compressed_image
-                image = cv2.imdecode(compressed_image, 1)
-                image_list.append(image)
-            image_dict[cam_name] = image_list
-
-
-    return qpos, qvel, effort, action, base_action, image_dict
+    # Compressed images are left as padded JPEG bytes; save_videos decodes them frame by frame.
+    return qpos, qvel, effort, action, base_action, image_dict, compressed
 
 import os
 
@@ -94,11 +86,12 @@ def main(args):
             dataset_name = f'episode_{episode_idx}'
 
         # Load the data
-        qpos, qvel, effort, action, base_action, image_dict = load_hdf5(dataset_dir, dataset_name)
+        qpos, qvel, effort, action, base_action, image_dict, compressed = load_hdf5(dataset_dir, dataset_name)
         print(f'HDF5 for {dataset_name} loaded!!')
 
         # Save the video
-        save_videos(image_dict, DT, video_path=os.path.join(dataset_dir, dataset_name + '_video.mp4'))
+        save_videos(image_dict, DT, video_path=os.path.join(dataset_dir, dataset_name + '_video.mp4'),
+                    compressed=compressed)
 
         # Visualize joint data
         visualize_joints(qpos, action, plot_path=os.path.join(dataset_dir, dataset_name + '_qpos.png'))
@@ -112,7 +105,7 @@ def main(args):
         # TODO: Add timestamp visualization if needed
         # visualize_timestamp(t_list, dataset_path)
 
-def save_videos(video, dt, video_path=None):
+def save_videos(video, dt, video_path=None, compressed=False):
     if isinstance(video, list):
         cam_names = list(video[0].keys())
         h, w, _ = video[0][cam_names[0]].shape
@@ -130,20 +123,33 @@ def save_videos(video, dt, video_path=None):
         out.release()
         print(f'Saved video to: {video_path}')
     elif isinstance(video, dict):
+        # video: {cam_name: per-frame images (T, H, W, 3), or padded JPEG bytes if compressed}.
+        # Build one frame at a time instead of materialising the whole episode (decoded
+        # 4 cams x ~1600 frames peaked at ~17 GB). Worker threads decode a bounded window of
+        # upcoming frames (cv2 releases the GIL) while this thread runs the encoder.
         cam_names = list(video.keys())
-        all_cam_videos = []
-        for cam_name in cam_names:
-            all_cam_videos.append(video[cam_name])
-        all_cam_videos = np.concatenate(all_cam_videos, axis=2) # width dimension
+        n_frames = len(video[cam_names[0]])
 
-        n_frames, h, w, _ = all_cam_videos.shape
+        def get_frame(t):
+            images = [cv2.imdecode(video[c][t], 1) if compressed else video[c][t] for c in cam_names]
+            return np.concatenate(images, axis=1)[:, :, [2, 1, 0]]  # width dimension; swap B and R channel
+
         fps = int(1 / dt)
-        out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-        for t in range(n_frames):
-            image = all_cam_videos[t]
-            image = image[:, :, [2, 1, 0]]  # swap B and R channel
-            out.write(image)
-        out.release()
+        out = None
+        with ThreadPoolExecutor(max_workers=4) as ex:
+            pending = deque(ex.submit(get_frame, t) for t in range(min(16, n_frames)))
+            next_t = len(pending)
+            while pending:
+                image = pending.popleft().result()
+                if next_t < n_frames:
+                    pending.append(ex.submit(get_frame, next_t))
+                    next_t += 1
+                if out is None:
+                    h, w, _ = image.shape
+                    out = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                out.write(image)
+        if out is not None:
+            out.release()
         print(f'Saved video to: {video_path}')
 
 

@@ -188,6 +188,7 @@ def main(args):
         'task_name': task_name,
         'seed': args['seed'],
         'temporal_ensemble': args['temporal_ensemble'],
+        'query_frequency': args['query_frequency'],
         'camera_names': camera_names,
         'real_robot': not is_sim,
         'load_pretrain': args['load_pretrain'],
@@ -424,6 +425,12 @@ def eval_bc(config, ckpt_name, save_episode=True, num_rollouts=1):
     if temporal_ensemble:
         query_frequency = 1
         num_queries = policy_config['num_queries']
+    if config.get('query_frequency') is not None:
+        if temporal_ensemble:
+            raise ValueError('--query_frequency cannot be combined with --temporal_ensemble')
+        if not 1 <= config['query_frequency'] <= policy_config['num_queries']:
+            raise ValueError(f"--query_frequency must be in [1, chunk_size={policy_config['num_queries']}]")
+        query_frequency = config['query_frequency']
     if real_robot:
         BASE_DELAY = 0  # 13 -> 0
         query_frequency -= BASE_DELAY
@@ -942,6 +949,9 @@ if __name__ == '__main__':
     parser.add_argument('--hidden_dim', action='store', type=int, help='hidden_dim', required=False)
     parser.add_argument('--dim_feedforward', action='store', type=int, help='dim_feedforward', required=False)
     parser.add_argument('--temporal_ensemble', action='store_true')
+    parser.add_argument('--query_frequency', action='store', type=int, default=None,
+                        help='eval only, without --temporal_ensemble: re-infer every N steps and execute the first N '
+                             'actions of each chunk (default: chunk_size, i.e. fully open-loop chunks)')
     parser.add_argument('--use_vq', action='store_true')
     parser.add_argument('--vq_class', action='store', type=int, help='vq_class')
     parser.add_argument('--vq_dim', action='store', type=int, help='vq_dim')

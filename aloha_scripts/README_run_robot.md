@@ -222,7 +222,95 @@ python3 aloha_scripts/hil_episode_to_video.py \
 
 ---
 
-## 4. 常用参数（`hil_rollout.py`；`run_pi_policy.py` 的参数见第 2 节和 `--help`）
+## 4. 用 HIL 数据继续训练
+
+`hil_split_episodes.py` 默认 `--keep intervention`：只留"人类真正在控制手臂"的那些段，当成 DAgger 要喂给模型的纠正数据。
+**不要**用 `--keep active`/`autonomous` 来做训练数据——`active` 会把策略当时犯错的动作也当成"正确答案"喂进去，`autonomous` 等于让模型学它自己已经会的东西，都没有新信息；这两个选项更适合调试/看效果，不是用来训练的。
+
+> 补充：Berkeley 的 DAgger 实践（见下面"demo : HIL 配比怎么定"）发现**纯用 intervention 不一定最稳**——他们额外保留了新一轮里策略自己正常跑、没被打断的那段（`--keep autonomous`，但是**这一轮新录的**，不是旧的 autonomous 数据），和接管数据按差不多的量级混进去，效果比纯 intervention 或纯整条 episode 都好。如果纯 `--keep intervention` 训出来效果不稳，这是一个可以试的方向，不是必须改。
+
+切出来的 episode（`<task>_hil_corrections/episode_K.hdf5` 或 `episode_K/`）和普通录制**完全同格式**，后面两条训练路径走法不一样：
+
+### demo : HIL 配比怎么定
+
+没有统一的"标准比例"，但两条真实案例给的数字比空想靠谱：
+
+- **Berkeley 团队**（论文《Scalable Behavior Cloning with Open Data, Training, and Evaluation》，代码见 [i2rt-robotics/abc](https://github.com/i2rt-robotics/abc)）的 DAgger 配比：**80% 上一轮数据 + 10% 本轮接管纠正 + 10% 本轮剩下的部分**（同一批新 episode 里策略自己正常跑、没被打断的那段）。他们测试过"只用接管数据"和"只用完整 episode"两种极端，**都比这个配比差**——纯接管数据会让模型在"旧 demo 场景"和"新纠正场景"之间学出虚假关联。
+- **反面案例**（Pebblous 博客，真实 GR00T 训练记录）：加入 93 条纠正 episode（占混合数据 24%）**不加权直接拼接**，闭环成功率从 73% 掉到 43%，offline 指标还看不出问题。**不加权拼接不只是把纠正信号稀释，甚至可能主动把模型带坏**。
+- **正面案例**（Axis Robotics 博客）：大约 **2:1（原始 : 新纠正数据）** 混合，闭环成功率 57.1% → 66.3%。
+
+**"不加权直接拼"具体什么意思**：LeRobot 的 `MultiLeRobotDataset`（openpi 合并数据集用的类）`__len__()` 返回总帧数，`__getitem__(idx)` 按全局帧序号直接取——相当于把两份数据的所有帧摊成一个大列表，`DataLoader` 打乱后均匀抽，每一帧中标概率都一样，**代码里压根没有调这个概率的机制**，不是故意调低。实测 `packaging_simple_2_hil` 的 7 条 HIL episode：有接管的 5 条平均每条真正 intervention 的帧数只有约 500 帧（10 秒左右），另外 2 条接管帧数是 0（录了但没真纠正，切完贡献不了数据）；而完整 demo 一条约 2500~3800 帧。50 条 demo + 10 条 HIL 直接合并，纠正帧数大概只占总帧数的 3%~4%，几乎被淹没。
+
+两条训练路径因此做法不同：
+
+- **ACT**：用现成的 `sample_weights`（见下面 ACT 小节），直接按权重控制占比，不用动文件。
+- **openpi / pi0.5**：没有数据集级别的加权字段，想把 HIL 占比抬到 10%~20%（对应 Berkeley 的量级），只能用物理手段——把切出来的 HIL 纠正 episode 在合并前复制 3~5 份再跑转换脚本，粗暴但有效。合并完**务必做闭环 eval**，不能只看 loss/offline 指标（Pebblous 的案例就是 offline 看不出问题，实际部署才发现变差）。
+
+### ACT（本地，这个仓库自己的 `imitate_episodes_multi_gpu.py`）
+
+`hil_split_episodes.py` 切出来的 hdf5 可以直接喂给 ACT，不需要任何转换——格式和 `record_episodes_aloha2.py` 的原始录制完全一样，`utils.py` 的 `find_all_hdf5()` 只是递归找所有 `*.hdf5`，不关心文件名和目录结构。
+
+把纠正数据和原始示教数据合在一起训练，推荐在 `constants.py` 里仿照已有的 `zip_tie_cotrain` 新建一个 cotrain 任务配置：
+
+```python
+'packaging_cotrain': {
+    'dataset_dir': [DATA_DIR + '/packaging', DATA_DIR + '/packaging_hil_corrections'],
+    'sample_weights': [1, 3],   # 可选：纠正数据通常量少但更珍贵，适当加权重采样
+    'episode_len': 1600,
+    'camera_names': [...],      # 和原任务一致
+},
+```
+
+然后照常训练，用 `--resume_ckpt_path` 从旧 checkpoint 热启动（README.md"Policy Training"小节本来就是给这个场景写的）：
+
+```bash
+python imitate_episodes_multi_gpu.py \
+    --task_name packaging_cotrain \
+    --ckpt_dir <新的 ckpt_dir> \
+    --policy_class ACT \
+    ...（其它超参和之前一致）\
+    --resume_ckpt_path <旧 ckpt_dir>/policy_last.ckpt
+```
+
+`--resume_ckpt_path` 只加载模型权重，不恢复 optimizer 状态和 step 计数，所以 `--num_steps` 填的是"这次新训练要跑多少步"。`dataset_stats.pkl`（归一化用的均值方差）每次训练都会在 `--ckpt_dir` 里重新算一份，eval 时也是读新 ckpt_dir 自己的 stats，新旧 checkpoint 之间不会因为数据集变了对不上，不用担心。练完之后照常 `--eval --ckpt_dir <新 ckpt_dir>` 部署，没有额外转换步骤。
+
+### openpi / pi0.5（服务器端）
+
+openpi 不直接吃原始 hdf5，训练用的是 LeRobot 格式数据集（`serve_policy.py` 部署时读的 `norm_stats.json` 就在这个数据集目录下）。以下流程已经在服务器上对着真实脚本和历史 log（`packaging_simple_2_plus_pipeline.log`）核对过：
+
+1. **转换 + 合并进 LeRobot 数据集**（openpi 仓库自带的转换脚本支持往已有数据集上追加新 episode，`--base-repo-id` 指向的旧数据集本身不会被改动，只是硬链接，不占新磁盘空间）：
+
+   ```bash
+   cd /mnt/ssd2/guningquan/Programs_server/openpi
+   uv run examples/aloha_real/convert_aloha_data_to_lerobot_no_bgr2rgb.py \
+     --raw-dir <task>_hil_corrections \
+     --base-repo-id /mnt/ssd2/guningquan/Dataset/packaging_simple_2_lerobot \
+     --repo-id /mnt/ssd2/guningquan/Dataset/packaging_simple_2_hil_lerobot \
+     --task "packaging the items" --num-workers 6
+   ```
+
+   `--raw-dir` 要求目录里直接是 `episode_N.hdf5`（不递归找子文件夹），`hil_split_episodes.py` 切出来的文件名正好是这个格式。
+2. **在 `src/openpi/training/config.py` 里新加一个 `TrainConfig`**：复制现有的 `pi05_packaging_simple_2_plus_full` 那段，只改 `data.repo_id` 指向上一步的新数据集。`weight_loader`/`pytorch_weight_path` 从 0 开始还是接着练，两种都可以：
+   - **从 0 开始**：保持指向 pi0.5 官方基础模型（`gs://openpi-assets/checkpoints/pi05_base/params` / `pytorch_weight_path=.../pi05_base_pytorch`）——这个项目里 `pi05_packaging_simple_2_full`/`_plus_full` 这几个配置目前都是这么写的，但这是**这几个 config 自己的选择，不是框架限制**。
+   - **接着上一次任务 checkpoint 继续练**：把 `pytorch_weight_path` 改指向旧 checkpoint 的 step 目录，比如 `.../pi05_packaging_simple_2_full/packaging_simple_2_pt/20000`。`scripts/train_pytorch.py` 存 checkpoint 时写的就是一个 `model.safetensors`（第 167 行），加载 `pytorch_weight_path` 时读的也是同名文件（第 445-446 行），格式完全兼容，不用改代码。`config.py` 里也有先例：`pi05_droid_finetune` 的 `weight_loader` 就指向另一个已微调过的 checkpoint（`gs://openpi-assets/checkpoints/pi05_droid/params`），不是最原始的 base model。
+     这种方式是**只加载权重**（跟 ACT 的 `--resume_ckpt_path` 同一类），不等于 `--resume`——`--resume` 是接着同一个 `exp_name` 的中断训练，连 optimizer 状态和 step 数一起恢复，针对的是训练中断重跑，不是"接上一个任务的 checkpoint 开始新任务"。
+3. **算归一化统计**（合并数据集后必须重新算，不会自动生成）：
+
+   ```bash
+   uv run scripts/compute_norm_stats.py <新 config 名>
+   ```
+4. **训练**（多卡用 `torchrun`）：
+
+   ```bash
+   torchrun --standalone --nnodes=1 --nproc_per_node=<GPU 数> scripts/train_pytorch.py <新 config 名> --exp_name=<新实验名>
+   ```
+5. **部署**：和现在一样，`serve_policy.py --policy.config=<新 config 名> --policy.dir=<checkpoint 目录>/<新实验名>/<step>`。
+
+这一整套（采集 HIL → 切纠正段 → 合并进训练集 → 续练/重新微调 → 换新 checkpoint 部署 → 继续采集）就是标准 DAgger 循环。
+
+---
+
+## 5. 常用参数（`hil_rollout.py`；`run_pi_policy.py` 的参数见第 2 节和 `--help`）
 
 | 参数                                               | 默认      | 说明                                                                            |
 | -------------------------------------------------- | --------- | ------------------------------------------------------------------------------- |
@@ -240,7 +328,7 @@ python3 aloha_scripts/hil_episode_to_video.py \
 
 `python3 aloha_scripts/hil_rollout.py --help` 看全部参数。
 
-## 5. 常见问题
+## 6. 常见问题
 
 | 现象                                                    | 处理                                                                                                      |
 | ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
