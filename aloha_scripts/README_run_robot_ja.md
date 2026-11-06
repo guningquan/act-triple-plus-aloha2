@@ -263,7 +263,228 @@ python3 aloha_scripts/hil_episode_to_video.py \
 
 ---
 
-## 4. よく使うパラメータ（`hil_rollout.py`。`run_pi_policy.py` のパラメータは第2節と `--help` を参照）
+## 4. HILデータで学習を続ける
+
+`hil_split_episodes.py` のデフォルトは `--keep intervention` です。「人間が実際にアームを操作していた」区間だけを残し、
+DAggerでモデルに与える修正データとして使います。
+学習データに `--keep active` / `autonomous` を使っては**いけません**。`active` は、その時ポリシーが間違えた動作まで
+「正解」として与えてしまい、`autonomous` はモデルが既にできることをもう一度学ばせるだけで、どちらも新しい情報がありません。
+この2つはデバッグや挙動の確認向きで、学習用ではありません。
+
+> 補足: BerkeleyのDAgger実践（下の「デモ : HILの混合比率の決め方」を参照）では、**介入データだけを使うのが必ずしも最も安定とは限らない**
+> ことが分かっています。新しい1ラウンドの中でポリシーが自力で正常に動いた（中断されなかった）区間（`--keep autonomous`。ただし
+> **今回新しく録ったもの**であり、古い autonomous データではない）も追加で残し、介入データと同程度の量で混ぜると、介入データのみ・
+> エピソード全体のみのどちらよりも良い結果でした。`--keep intervention` だけで学習した結果が不安定な場合に試せる方向で、
+> 必ず変更すべきというわけではありません。
+
+切り出したエピソード（`<task>_hil_corrections/episode_K.hdf5` または `episode_K/`）は通常の録画と**完全に同じ形式**です。
+以降の学習は2つのルートで進め方が異なります。
+
+### デモ : HILの混合比率の決め方
+
+「標準の比率」はありませんが、実際の事例の数字は憶測よりも頼りになります。
+
+- **Berkeleyチーム**（論文『Scalable Behavior Cloning with Open Data, Training, and Evaluation』、コードは
+  [i2rt-robotics/abc](https://github.com/i2rt-robotics/abc)）のDAgger比率: **前ラウンドのデータ80% + 今ラウンドの介入修正10% +
+  今ラウンドの残り10%**（同じ新しいエピソード群のうち、ポリシーが自力で正常に動いた、中断されなかった区間）。
+  「介入データのみ」と「完全なエピソードのみ」の両極端も試しましたが、**どちらもこの比率より悪い**結果でした。介入データのみだと、
+  モデルが「古いデモの場面」と「新しい修正の場面」の間に偽の相関を学習してしまいます。
+- **悪い例**（Pebblousのブログ、実際のGR00T学習記録）: 修正エピソード93本（混合データの24%）を**重み付けなしで単純連結**したところ、
+  クローズドループの成功率が73%から43%に低下し、offline指標では問題が見えませんでした。**重み付けなしの連結は、修正信号を薄める
+  だけでなく、モデルを積極的に悪化させることさえあります**。
+- **良い例**（Axis Roboticsのブログ）: おおよそ **2:1（元データ : 新しい修正データ）** で混ぜ、クローズドループの成功率が
+  57.1% → 66.3%。
+
+**「重み付けなしの単純連結」とは具体的に何か**: LeRobotの `MultiLeRobotDataset`（openpiがデータセットを統合するときに使うクラス）は、
+`__len__()` が総フレーム数を返し、`__getitem__(idx)` はグローバルなフレーム番号でそのまま取り出します。つまり2つのデータの全フレームを
+1本の大きなリストに並べ、`DataLoader` がシャッフルして均一に引くので、どのフレームも選ばれる確率は同じです。**確率を調整する仕組みは
+コード上に存在せず**、わざと下げているわけではありません。実測（次の節の `hil_compare_lengths.py` を使用）: `packaging_simple_2` の
+50本のデモは合計91,616フレーム（1本平均約1,830フレーム、最長2,500）。`packaging_simple_2_hil` の7本のHILエピソードは合計21,322
+フレームで、実際に介入していたのは2,489フレームだけ（5本で各約500フレーム、約10秒）、残り2本は介入フレームが0（録画したが実際には
+修正しなかったため、切り出しても貢献しない）、さらに約30%（6,487フレーム）は一時停止中でフォロワーが動いていません。介入データは
+元データのわずか2.7%で、そのまま統合するとほとんど埋もれてしまいます。
+
+2つの学習ルートはそれぞれ次のように対処します:
+
+- **ACT**: 既存の `sample_weights`（下のACTの節を参照）で、重みによって比率を直接制御できます。ファイルをいじる必要はありません。
+- **openpi / pi0.5**: データセット単位の重みフィールドはありません。追加するHILデータを元データの10%〜20%にしたければ（Berkeleyと同じ
+  オーダー）、多く録るか、物理的な手段を使います。切り出したHIL修正エピソードを変換前に何部かコピーしておく方法です（下のopenpiの節の
+  シンボリックリンクの書き方を参照）。乱暴ですが有効です。統合後は**必ずクローズドループ評価**を行ってください。loss / offline指標
+  だけでは不十分です（Pebblousの事例は、offlineでは問題が見えず、実機にデプロイして初めて悪化に気づいたものです）。
+
+「追加データが元データの何％か」（new/base）に換算すると、Berkeleyの10%（旧データ80%に対して）は約12.5%、Axisの2:1は50%です。
+new/baseを10%〜20%にするのは、Berkeleyと同じオーダーで、Axisより控えめです。
+
+### まず長さを測り、それから比率を決める: `hil_compare_lengths.py`
+
+手計算せず、2つのデータの長さを直接測れます。追加する介入データが元データの何％か、10% / 20%に届かせるには何部コピーするか、
+あとどれだけ録ればよいかが分かります:
+
+```bash
+python3 aloha_scripts/hil_compare_lengths.py \
+  /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2 \
+  /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil
+# デフォルトでは新データのうち「人が実際に介入した」部分だけを数えます（--min_frames 25 フレーム以上の区間。
+# 基準は hil_split_episodes.py --keep intervention と完全に同じ）
+# --ratio 0.1 0.2   希望する 追加/元データ（デフォルトは 10% と 20%）
+# --part all        新データをエピソード全体で数える。--part autonomous|active は他の2つの切り方に対応
+# --per_episode     各エピソードのフレーム数とセグメント数
+```
+
+第1引数は元データで、`episode_*.hdf5` のディレクトリか、変換済みのLeRobotデータセット（`meta/info.json` の `total_frames` を読む）です。
+第2引数は `hil_rollout.py` が録画したディレクトリ（分割の前後どちらでも可）です。フレーム数は `/action` で数え、hdf5は50 Hzです。
+上の2つのディレクトリでの出力:
+
+```text
+base : .../packaging_simple_2  [hdf5]  50 episodes, 91,616 frames = 30.5 min @50 Hz (avg 1,832/episode)
+new  : .../packaging_simple_2_hil  [hdf5]  7 episodes, 21,322 frames = 7.1 min
+       autonomous 12,281 | paused 6,487 | correcting-skip 65 | intervention 2,489
+       counted: --part intervention (segments >= 25 frames) = 5 segment(s) in 5 of 7 episodes = 2,489 frames = 49.8 s
+
+new / base = 2.7%    share of new in base + new = 2.6%
+  new/base  10%  ->  k = 4  copies (new/base 10.9%, share of merged 9.8%, 9,956 frames); or record 6,673 more frames (~14 more corrections of 498)
+  new/base  20%  ->  k = 7  copies (new/base 19.0%, share of merged 16.0%, 17,423 frames); or record 15,834 more frames (~32 more corrections of 498)
+```
+
+読み方: 今は2.7%しかなく、10%にするにはこの5区間を4部コピーするか、あと約14回介入する必要があります。20%には7部のコピーが必要で、
+同じ5区間を7回繰り返すことになるため、コピーより多く録るほうがよいです。コピーが5部を超えると、ツールが「繰り返しが多すぎる」と表示します。
+
+### ACT（ローカル、このリポジトリ自身の `imitate_episodes_multi_gpu.py`）
+
+`hil_split_episodes.py` で切り出したhdf5は、そのままACTに与えられ、変換は不要です。形式は `record_episodes_aloha2.py` の元の録画と
+完全に同じで、`utils.py` の `find_all_hdf5()` は `*.hdf5` を再帰的に探すだけで、ファイル名やディレクトリ構成は問いません。
+
+修正データと元のデモデータを一緒に学習させるには、`constants.py` に既存の `zip_tie_cotrain` を参考にして cotrain 用のタスク設定を
+新規作成することを推奨します:
+
+```python
+'packaging_cotrain': {
+    'dataset_dir': [DATA_DIR + '/packaging', DATA_DIR + '/packaging_hil_corrections'],  # 検証データの分割に使うのは最初のディレクトリのみ
+    'sample_weights': [90, 10],  # 各バッチで各ディレクトリから引く確率（正規化後）。長さの比ではない
+    'episode_len': 1600,
+    'camera_names': [...],       # 元のタスクと同じ
+},
+```
+
+**`sample_weights` は「各ディレクトリが選ばれる確率」であり、ディレクトリに何フレームあるかとは無関係です**: `utils.py` の
+`BatchSampler` は、まず重みでディレクトリを選び、次にそのディレクトリ内から均一に1フレームを引きます。したがって:
+
+- **`sample_weights` を書かないと、各ディレクトリが50/50になります**。修正データが数千フレームしかなくてもバッチの半分を占め、同じ
+  フレームが何度も見られて過学習しやすくなります。
+- `[1, 3]` は25% / 75% であり、「データ量が1:3」という意味ではありません。
+- 介入データを10%にしたければ `[90, 10]` と書きます（`hil_compare_lengths.py` の出力に対応する p が出ます。追加/元データが10%なら
+  p ≈ 9%、20%なら p ≈ 17%）。各修正フレームが学習全体で見られる回数はおおよそ `ステップ数 × batch_size × p ÷ 修正の総フレーム数`
+  で、修正フレームが少ないとこの回数がとても大きくなるため、注意が必要です。
+- 正規化統計はデフォルトでは `dataset_dir` の全ディレクトリを合わせて再計算されます。古いcheckpointと揃えたい場合は、`zip_tie_cotrain`
+  のように `'stats_dir': [DATA_DIR + '/packaging']` を追加して元データだけで計算できます。
+
+あとは通常どおり学習し、`--resume_ckpt_path` で古いcheckpointからウォームスタートします（README.mdの「Policy Training」の節は
+まさにこの場面のために書かれています）:
+
+```bash
+python imitate_episodes_multi_gpu.py \
+    --task_name packaging_cotrain \
+    --ckpt_dir <新しい ckpt_dir> \
+    --policy_class ACT \
+    ...（その他のハイパーパラメータは以前と同じ）\
+    --resume_ckpt_path <古い ckpt_dir>/policy_last.ckpt
+```
+
+`--resume_ckpt_path` はモデルの重みだけを読み込み、optimizerの状態とステップ数は復元しないので、`--num_steps` には「今回の新しい学習で
+何ステップ走らせるか」を指定します。`dataset_stats.pkl`（正規化用の平均・分散）は学習のたびに `--ckpt_dir` に作り直され、evalのときも
+新しい ckpt_dir 自身のstatsを読むので、データセットが変わっても新旧のcheckpointで食い違うことはなく、心配は要りません。学習後は通常どおり
+`--eval --ckpt_dir <新しい ckpt_dir>` でデプロイでき、追加の変換は不要です。
+
+### openpi / pi0.5（サーバー側）
+
+openpiは元のhdf5を直接読まず、学習にはLeRobot形式のデータセットを使います（`serve_policy.py` がデプロイ時に読む `norm_stats.json` も
+このデータセットのディレクトリにあります）。以下の手順は、サーバー上で実際のスクリプトと過去のログ
+（`packaging_simple_2_plus_pipeline.log`）に照らして確認済みです:
+
+**統合のしかたは2通りあり、1つ目を推奨します**（以下の「新しいエピソード」は切り出した介入区間のことです。コピーの部数は前の節の
+`hil_compare_lengths.py` で決めます）:
+
+|            | A. 新しい分だけ変換し、変換済みのLeRobotデータセットに追加する（`--base-repo-id`、推奨）                                                                     | B. 2種類のhdf5をシンボリックリンクで同じディレクトリにまとめ、全体を変換し直す                      |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| 方法       | 新しいエピソードだけを変換する。旧データセットのparquetはハードリンク（`os.link`）で引き継ぐので、旧データセットは変更されず、追加のディスクも不要         | 元のデモ + 新しいエピソードをすべて変換し直す（openpi `README_ja.md` 3.3 の方法 2）                  |
+| 速度       | 速い。追加分だけ                                                                                                                                             | 遅い。数十本のデモも全部デコードし直す                                                               |
+| 結果       | 旧エピソードが前、新エピソードが後ろ。変換スクリプトとパラメータが同じなら、どちらの方法でも内容は同じ                                                       | 左に同じ                                                                                             |
+| 制限       | 新旧のカメラ / velocity / effort が一致している必要があり、一致しないと `features of ... differ` で即エラー。旧データセットは1 chunkのみで、統合後の総エピソード数が `chunks_size`（デフォルト1000）以下 | 上の制限はない                                                                                       |
+| 使う場面   | 旧LeRobotデータセットが残っていて、しかも現在のこの変換スクリプトとパラメータで変換したもの                                                                  | 旧データセットが別のバージョン／パラメータで変換されている（例: 上流のBGR→RGB付きバージョン）、古いデモの一部を除外・差し替えたい、promptを変えたい、旧データセットがもう無い |
+
+どちらの方法でも、その後は**norm statsの再計算**が必要です（`norm_stats.json` は引き継がれません）。HILのエピソードを丸ごと統合しては
+いけません。フレームの約30%は一時停止（フォロワーが動いていない）で、モデルに学ばせたい内容ではないからです。openpi
+`examples/aloha_real/README_ja.md` 3.3 の方法 1 で `packaging_move_box` を追加するコマンドが方法 A で、使い方はまったく同じです。
+
+1. **変換 + LeRobotデータセットへの統合**（方法 A。`--base-repo-id` が指す旧データセットは変更されません）:
+
+   HILデータはロボット本機で録画したもので、変換はサーバー上で行うので、先に分割済みのディレクトリをコピーします:
+
+   ```bash
+   rsync -av /home/robot/Dataset_and_Checkpoint/dataset/<task>_hil_corrections/ \
+     server:/mnt/ssd2/guningquan/Dataset/<task>_hil_corrections/
+   ```
+
+   ```bash
+   cd /mnt/ssd2/guningquan/Programs_server/openpi
+   uv run examples/aloha_real/convert_aloha_data_to_lerobot_no_bgr2rgb.py \
+     --raw-dir /mnt/ssd2/guningquan/Dataset/<task>_hil_corrections \
+     --base-repo-id /mnt/ssd2/guningquan/Dataset/packaging_simple_2_lerobot \
+     --repo-id /mnt/ssd2/guningquan/Dataset/packaging_simple_2_hil_lerobot \
+     --task "packaging the items" --num-workers 6
+   ```
+
+   - `--raw-dir` は、ディレクトリ直下に `episode_N.hdf5` が並んでいる必要があります（`episode_*.hdf5` にだけ一致し、サブフォルダは再帰的に探しません）。
+     `hil_split_episodes.py` が切り出すファイル名はちょうどこの形式です。
+   - **`--repo-id` が既に存在する場合は、ディレクトリごと削除して作り直されます**。そのため `--base-repo-id` とは別のものにする必要があります
+     （両者が同じだとスクリプトが拒否します）。
+   - 変換が終わると最後の行に `has N episodes, M frames` と表示され、新しいエピソードの長さがhdf5と一致することはスクリプトが1本ずつ
+     確認済みです。M を、`hil_compare_lengths.py` で計算した「元データのフレーム数 + コピー部数 × 新しいフレーム数」と突き合わせてください。
+   - **k部コピーしたい場合**（openpiには重み付けがないので、比率を上げるにはこの方法しかありません）: `--raw-dir` に分割済みディレクトリを
+     直接指定せず、シンボリックリンクだけを置いたディレクトリを指定し、コピーごとに別の番号を付けます（以下はk=4の例）:
+
+     ```bash
+     S=/mnt/ssd2/guningquan/Dataset/<task>_hil_corrections          # 分割済みのディレクトリ（サーバーにコピー済み）
+     R=/mnt/ssd2/guningquan/Dataset/<task>_hil_corrections_x4       # 変換用ディレクトリ。中身はシンボリックリンクのみ
+     mkdir -p $R; N=$(ls $S/episode_*.hdf5 | wc -l)
+     for c in 0 1 2 3; do for i in $(seq 0 $((N-1))); do
+       ln -s $S/episode_$i.hdf5 $R/episode_$((c*N+i)).hdf5; done; done
+     ```
+
+     そのあと `--raw-dir $R` にして、残りは同じです。
+2. **`src/openpi/training/config.py` に新しい `TrainConfig` を追加**: 既存の `pi05_packaging_simple_2_plus_full` の部分をコピーし、
+   `data.repo_id` だけを前の手順で作った新しいデータセットに変更します。`weight_loader` / `pytorch_weight_path` は、ゼロから始めるか続きから学習するか、どちらも可能です:
+   - **ゼロから始める**: pi0.5の公式ベースモデル（`gs://openpi-assets/checkpoints/pi05_base/params` / `pytorch_weight_path=.../pi05_base_pytorch`）を指したままにします。
+     このプロジェクトの `pi05_packaging_simple_2_full` / `_plus_full` などの設定は現在すべてこうなっていますが、これは**これらのconfig自身の選択であり、
+     フレームワークの制約ではありません**。
+   - **前回のタスクのcheckpointから続けて学習する**: `pytorch_weight_path` を古いcheckpointのstepディレクトリ、たとえば
+     `.../pi05_packaging_simple_2_full/packaging_simple_2_pt/20000` に変更します。`scripts/train_pytorch.py` がcheckpointを保存するときに書くのは
+     `model.safetensors` 1つ（167行目）で、`pytorch_weight_path` を読み込むときに読むのも同名のファイル（445〜446行目）なので、形式は完全に互換で、
+     コードの変更は不要です。`config.py` にも前例があり、`pi05_droid_finetune` の `weight_loader` は、最初のベースモデルではなく、既にファインチューニング済みの
+     別のcheckpoint（`gs://openpi-assets/checkpoints/pi05_droid/params`）を指しています。
+     この方法は**重みだけを読み込む**もの（ACTの `--resume_ckpt_path` と同じ種類）で、`--resume` とは別です。`--resume` は同じ `exp_name` の中断した学習の続きで、
+     optimizerの状態とステップ数も一緒に復元します。対象は学習が中断して再実行する場合であり、「前のタスクのcheckpointから新しいタスクを始める」ためのものではありません。
+3. **正規化統計を計算**（データセットを統合した後は必ず再計算が必要で、自動では生成されません）:
+
+   ```bash
+   uv run scripts/compute_norm_stats.py --config-name <新しい config 名>
+   ```
+
+   config名は `--config-name <名前>` の形で指定します。スクリプトの後ろに名前だけを書くと、引数エラーになります。
+4. **学習**（複数GPUでは `torchrun`。`CUDA_VISIBLE_DEVICES`、`PYTORCH_CUDA_ALLOC_CONF`、GPUメモリと所要時間の目安は、openpi
+   `examples/aloha_real/README_ja.md` の第6節を参照）:
+
+   ```bash
+   uv run torchrun --standalone --nnodes=1 --nproc_per_node=<GPU数> scripts/train_pytorch.py <新しい config 名> --exp-name <新しい実験名>
+   ```
+5. **デプロイ**: 現在と同じで、`serve_policy.py --policy.config=<新しい config 名> --policy.dir=<checkpointディレクトリ>/<新しい実験名>/<step>` です。
+
+この一連の流れ（HIL収集 → 修正区間の切り出し → 学習データへの統合 → 続きの学習／再ファインチューニング → 新しいcheckpointでデプロイ →
+収集を続ける）が、標準的なDAggerのループです。
+
+---
+
+## 5. よく使うパラメータ（`hil_rollout.py`。`run_pi_policy.py` のパラメータは第2節と `--help` を参照）
 
 | パラメータ                                         | デフォルト | 説明                                                                                 |
 | -------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------ |
@@ -281,7 +502,7 @@ python3 aloha_scripts/hil_episode_to_video.py \
 
 全パラメータは `python3 aloha_scripts/hil_rollout.py --help` を参照してください。
 
-## 5. よくある問題
+## 6. よくある問題
 
 | 症状                                                                 | 対処                                                                                                                                                                                                |
 | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

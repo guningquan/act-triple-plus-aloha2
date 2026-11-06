@@ -4,7 +4,7 @@
 由 openpi 或 N0-VTLA 仓库自己的 `scripts/serve_policy.py` 加载，两者都是 websocket + msgpack，默认端口 8000。
 
 ```
-[服务器 10.240.77.20]  serve_policy.py  ◀── websocket :8000 ──▶  [本机] run_pi_policy.py / run_vtla_policy.py / hil_rollout.py ── ROS ── 手臂 + 相机 (+ 触觉)
+[服务器 00010.240.77.20]  serve_policy.py  ◀── websocket :8000 ──▶  [本机] run_pi_policy.py / run_vtla_policy.py / hil_rollout.py ── ROS ── 手臂 + 相机 (+ 触觉)
 ```
 
 | 场景                                            | 本机脚本               |
@@ -239,12 +239,43 @@ python3 aloha_scripts/hil_episode_to_video.py \
 - **反面案例**（Pebblous 博客，真实 GR00T 训练记录）：加入 93 条纠正 episode（占混合数据 24%）**不加权直接拼接**，闭环成功率从 73% 掉到 43%，offline 指标还看不出问题。**不加权拼接不只是把纠正信号稀释，甚至可能主动把模型带坏**。
 - **正面案例**（Axis Robotics 博客）：大约 **2:1（原始 : 新纠正数据）** 混合，闭环成功率 57.1% → 66.3%。
 
-**"不加权直接拼"具体什么意思**：LeRobot 的 `MultiLeRobotDataset`（openpi 合并数据集用的类）`__len__()` 返回总帧数，`__getitem__(idx)` 按全局帧序号直接取——相当于把两份数据的所有帧摊成一个大列表，`DataLoader` 打乱后均匀抽，每一帧中标概率都一样，**代码里压根没有调这个概率的机制**，不是故意调低。实测 `packaging_simple_2_hil` 的 7 条 HIL episode：有接管的 5 条平均每条真正 intervention 的帧数只有约 500 帧（10 秒左右），另外 2 条接管帧数是 0（录了但没真纠正，切完贡献不了数据）；而完整 demo 一条约 2500~3800 帧。50 条 demo + 10 条 HIL 直接合并，纠正帧数大概只占总帧数的 3%~4%，几乎被淹没。
+**"不加权直接拼"具体什么意思**：LeRobot 的 `MultiLeRobotDataset`（openpi 合并数据集用的类）`__len__()` 返回总帧数，`__getitem__(idx)` 按全局帧序号直接取——相当于把两份数据的所有帧摊成一个大列表，`DataLoader` 打乱后均匀抽，每一帧中标概率都一样，**代码里压根没有调这个概率的机制**，不是故意调低。实测（用下一节的 `hil_compare_lengths.py`）：`packaging_simple_2` 的 50 条 demo 共 91,616 帧（平均每条约 1,830 帧，最长 2,500）；`packaging_simple_2_hil` 的 7 条 HIL episode 共 21,322 帧，其中真正接管的只有 2,489 帧（5 条各约 500 帧，10 秒左右），另外 2 条接管帧数是 0（录了但没真纠正，切完贡献不了数据），还有约 30%（6,487 帧）是暂停、从臂不动。接管数据只占原数据的 2.7%，直接合并几乎被淹没。
 
 两条训练路径因此做法不同：
 
 - **ACT**：用现成的 `sample_weights`（见下面 ACT 小节），直接按权重控制占比，不用动文件。
-- **openpi / pi0.5**：没有数据集级别的加权字段，想把 HIL 占比抬到 10%~20%（对应 Berkeley 的量级），只能用物理手段——把切出来的 HIL 纠正 episode 在合并前复制 3~5 份再跑转换脚本，粗暴但有效。合并完**务必做闭环 eval**，不能只看 loss/offline 指标（Pebblous 的案例就是 offline 看不出问题，实际部署才发现变差）。
+- **openpi / pi0.5**：没有数据集级别的加权字段，想让新增的 HIL 数据占原数据的 10%~20%（对应 Berkeley 的量级），要么多采，要么用物理手段——把切出来的 HIL 纠正 episode 在转换前复制若干份（见下面 openpi 小节的符号链接写法），粗暴但有效。合并完**务必做闭环 eval**，不能只看 loss/offline 指标（Pebblous 的案例就是 offline 看不出问题，实际部署才发现变差）。
+
+换算成"新增数据占原数据的百分比"（new/base）：Berkeley 的 10% 接管对 80% 旧数据约是 12.5%，Axis 的 2:1 是 50%。所以 new/base 取 10%~20%，和 Berkeley 同一量级，比 Axis 保守。
+
+### 先量长度，再定配比：`hil_compare_lengths.py`
+
+不用手算，直接量两份数据的长度，看新增的接管数据占原数据百分之几、要复制几份或再多采多少才到 10% / 20%：
+
+```bash
+python3 aloha_scripts/hil_compare_lengths.py \
+  /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2 \
+  /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil
+# 默认只数新数据里"人真正接管"的部分（≥ --min_frames 25 帧的段，口径和 hil_split_episodes.py --keep intervention 完全一致）
+# --ratio 0.1 0.2   想要的 新增/原数据（默认 10% 和 20%）
+# --part all        新数据整条都数；--part autonomous|active 对应另外两种切法
+# --per_episode     每条的帧数和段数
+```
+
+第一个参数是原数据：`episode_*.hdf5` 目录，或已经转好的 LeRobot 数据集（读 `meta/info.json` 的 `total_frames`）。第二个参数是 `hil_rollout.py` 录的目录（切分前后都行）。帧数按 `/action` 数，hdf5 为 50 Hz。对上面这两个目录的输出：
+
+```text
+base : .../packaging_simple_2  [hdf5]  50 episodes, 91,616 frames = 30.5 min @50 Hz (avg 1,832/episode)
+new  : .../packaging_simple_2_hil  [hdf5]  7 episodes, 21,322 frames = 7.1 min
+       autonomous 12,281 | paused 6,487 | correcting-skip 65 | intervention 2,489
+       counted: --part intervention (segments >= 25 frames) = 5 segment(s) in 5 of 7 episodes = 2,489 frames = 49.8 s
+
+new / base = 2.7%    share of new in base + new = 2.6%
+  new/base  10%  ->  k = 4  copies (new/base 10.9%, share of merged 9.8%, 9,956 frames); or record 6,673 more frames (~14 more corrections of 498)
+  new/base  20%  ->  k = 7  copies (new/base 19.0%, share of merged 16.0%, 17,423 frames); or record 15,834 more frames (~32 more corrections of 498)
+```
+
+读法：现在只有 2.7%，到 10% 要把这 5 段复制 4 份，或者再多接管约 14 次；到 20% 要复制 7 份，同样的 5 段被重复 7 遍，不如多采。复制份数超过 5 时工具会提示"重复太多"。
 
 ### ACT（本地，这个仓库自己的 `imitate_episodes_multi_gpu.py`）
 
@@ -254,12 +285,19 @@ python3 aloha_scripts/hil_episode_to_video.py \
 
 ```python
 'packaging_cotrain': {
-    'dataset_dir': [DATA_DIR + '/packaging', DATA_DIR + '/packaging_hil_corrections'],
-    'sample_weights': [1, 3],   # 可选：纠正数据通常量少但更珍贵，适当加权重采样
+    'dataset_dir': [DATA_DIR + '/packaging', DATA_DIR + '/packaging_hil_corrections'],  # 只有第一个目录参与验证集划分
+    'sample_weights': [90, 10],  # 每个 batch 里抽自各目录的概率（归一化后），不是长度比例
     'episode_len': 1600,
-    'camera_names': [...],      # 和原任务一致
+    'camera_names': [...],       # 和原任务一致
 },
 ```
+
+**`sample_weights` 是"每个目录被抽到的概率"，和目录里有多少帧无关**：`utils.py` 的 `BatchSampler` 先按权重选目录，再在该目录里均匀抽一帧。所以：
+
+- **不写 `sample_weights` 就是各目录 50/50**——纠正数据只有几千帧，也会占一半的 batch，同样的帧被反复看，很容易过拟合。
+- `[1, 3]` 是 25% / 75%，不是"1:3 的数据量比例"。
+- 想让接管数据占 10% 就写 `[90, 10]`（`hil_compare_lengths.py` 的输出里有对应的 p；新增/原数据 10% 对应 p ≈ 9%，20% 对应 p ≈ 17%）。每个纠正帧在整个训练里大约被看到 `步数 × batch_size × p ÷ 纠正总帧数` 次，纠正帧很少时这个次数会很大，要关注。
+- 归一化统计默认用 `dataset_dir` 里所有目录合并后重算；想和旧 checkpoint 保持一致，可以像 `zip_tie_cotrain` 那样加 `'stats_dir': [DATA_DIR + '/packaging']`，只用原数据算。
 
 然后照常训练，用 `--resume_ckpt_path` 从旧 checkpoint 热启动（README.md"Policy Training"小节本来就是给这个场景写的）：
 
@@ -278,31 +316,66 @@ python imitate_episodes_multi_gpu.py \
 
 openpi 不直接吃原始 hdf5，训练用的是 LeRobot 格式数据集（`serve_policy.py` 部署时读的 `norm_stats.json` 就在这个数据集目录下）。以下流程已经在服务器上对着真实脚本和历史 log（`packaging_simple_2_plus_pipeline.log`）核对过：
 
-1. **转换 + 合并进 LeRobot 数据集**（openpi 仓库自带的转换脚本支持往已有数据集上追加新 episode，`--base-repo-id` 指向的旧数据集本身不会被改动，只是硬链接，不占新磁盘空间）：
+**并进去有两种做法，推荐第一种**（以下说的"新 episode"就是切出来的接管段，复制份数见上一节 `hil_compare_lengths.py`）：
+
+|            | A. 只转新的，追加到已转好的 LeRobot 数据集（`--base-repo-id`，推荐）                                                                                                   | B. 两类 hdf5 用符号链接放进同一个目录，整体重转                                                                        |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- |
+| 做法       | 只转换新 episode；旧数据集的 parquet 用硬链接带过去（`os.link`），旧数据集本身不改动、不占额外磁盘                                                                     | 原示教 + 新 episode 全部重新转换（openpi `README_ja.md` 3.3 的方法 2）                                               |
+| 速度       | 快，只转新增的                                                                                                                                                           | 慢，几十条示教也要全部重新解码                                                                                         |
+| 结果       | 旧 episode 在前、新 episode 在后；只要转换脚本和参数没变，两种做法的内容相同                                                                                             | 同左                                                                                                                   |
+| 限制       | 新旧数据的相机 / velocity / effort 必须一致，不一致直接报 `features of ... differ`；旧数据集必须只有一个 chunk，合并后总 episode 数不超过 `chunks_size`（默认 1000） | 没有这些限制                                                                                                           |
+| 什么时候用 | 旧的 LeRobot 数据集还在，而且就是用现在这个转换脚本和参数转的                                                                                                            | 旧数据集是用别的版本 / 参数转的（比如上游带 BGR→RGB 的版本）、想剔除或替换某几条旧示教、想改 prompt、旧数据集已经不在 |
+
+两种做法之后都要**重新算 norm stats**（`norm_stats.json` 不会跟着带过去）。不要把整条 HIL episode 直接并进去：约 30% 的帧是暂停（从臂不动），不是想让模型学的东西。openpi `examples/aloha_real/README_ja.md` 3.3 方法 1 里补充 `packaging_move_box` 的命令就是做法 A，用法完全一样。
+
+1. **转换 + 合并进 LeRobot 数据集**（做法 A；`--base-repo-id` 指向的旧数据集不会被改动）：
+
+   HIL 数据是在机器人本机录的，转换在服务器上做，先把切好的目录拷过去：
+
+   ```bash
+   rsync -av /home/robot/Dataset_and_Checkpoint/dataset/<task>_hil_corrections/ \
+     server:/mnt/ssd2/guningquan/Dataset/<task>_hil_corrections/
+   ```
 
    ```bash
    cd /mnt/ssd2/guningquan/Programs_server/openpi
    uv run examples/aloha_real/convert_aloha_data_to_lerobot_no_bgr2rgb.py \
-     --raw-dir <task>_hil_corrections \
+     --raw-dir /mnt/ssd2/guningquan/Dataset/<task>_hil_corrections \
      --base-repo-id /mnt/ssd2/guningquan/Dataset/packaging_simple_2_lerobot \
      --repo-id /mnt/ssd2/guningquan/Dataset/packaging_simple_2_hil_lerobot \
      --task "packaging the items" --num-workers 6
    ```
 
-   `--raw-dir` 要求目录里直接是 `episode_N.hdf5`（不递归找子文件夹），`hil_split_episodes.py` 切出来的文件名正好是这个格式。
+   - `--raw-dir` 要求目录里直接是 `episode_N.hdf5`（只匹配 `episode_*.hdf5`，不递归找子文件夹），`hil_split_episodes.py` 切出来的文件名正好是这个格式。
+   - **`--repo-id` 如果已经存在，会被整个删掉重建**，所以它必须和 `--base-repo-id` 不同（脚本也会拒绝两者相同）。
+   - 转完最后一行会打印 `has N episodes, M frames`，并且脚本已经逐条核对过新 episode 的长度和 hdf5 一致；把 M 和 `hil_compare_lengths.py` 算出的"原数据帧数 + 复制份数 × 新帧数"对一下。
+   - **想要复制 k 份**（openpi 没有加权，只能这样抬高占比）：`--raw-dir` 不直接指向切分目录，而是指向一个只放符号链接的目录，每份用不同的编号（下面以 k=4 为例）：
+
+     ```bash
+     S=/mnt/ssd2/guningquan/Dataset/<task>_hil_corrections          # 切分目录（已拷到服务器）
+     R=/mnt/ssd2/guningquan/Dataset/<task>_hil_corrections_x4       # 转换用目录，里面全是符号链接
+     mkdir -p $R; N=$(ls $S/episode_*.hdf5 | wc -l)
+     for c in 0 1 2 3; do for i in $(seq 0 $((N-1))); do
+       ln -s $S/episode_$i.hdf5 $R/episode_$((c*N+i)).hdf5; done; done
+     ```
+
+     然后 `--raw-dir $R`，其余不变。
 2. **在 `src/openpi/training/config.py` 里新加一个 `TrainConfig`**：复制现有的 `pi05_packaging_simple_2_plus_full` 那段，只改 `data.repo_id` 指向上一步的新数据集。`weight_loader`/`pytorch_weight_path` 从 0 开始还是接着练，两种都可以：
+
    - **从 0 开始**：保持指向 pi0.5 官方基础模型（`gs://openpi-assets/checkpoints/pi05_base/params` / `pytorch_weight_path=.../pi05_base_pytorch`）——这个项目里 `pi05_packaging_simple_2_full`/`_plus_full` 这几个配置目前都是这么写的，但这是**这几个 config 自己的选择，不是框架限制**。
    - **接着上一次任务 checkpoint 继续练**：把 `pytorch_weight_path` 改指向旧 checkpoint 的 step 目录，比如 `.../pi05_packaging_simple_2_full/packaging_simple_2_pt/20000`。`scripts/train_pytorch.py` 存 checkpoint 时写的就是一个 `model.safetensors`（第 167 行），加载 `pytorch_weight_path` 时读的也是同名文件（第 445-446 行），格式完全兼容，不用改代码。`config.py` 里也有先例：`pi05_droid_finetune` 的 `weight_loader` 就指向另一个已微调过的 checkpoint（`gs://openpi-assets/checkpoints/pi05_droid/params`），不是最原始的 base model。
      这种方式是**只加载权重**（跟 ACT 的 `--resume_ckpt_path` 同一类），不等于 `--resume`——`--resume` 是接着同一个 `exp_name` 的中断训练，连 optimizer 状态和 step 数一起恢复，针对的是训练中断重跑，不是"接上一个任务的 checkpoint 开始新任务"。
 3. **算归一化统计**（合并数据集后必须重新算，不会自动生成）：
 
    ```bash
-   uv run scripts/compute_norm_stats.py <新 config 名>
+   uv run scripts/compute_norm_stats.py --config-name <新 config 名>
    ```
-4. **训练**（多卡用 `torchrun`）：
+
+   config 名要写成 `--config-name <名字>`，直接跟在脚本后面写名字会报参数错误。
+4. **训练**（多卡用 `torchrun`；`CUDA_VISIBLE_DEVICES`、`PYTORCH_CUDA_ALLOC_CONF`、显存和耗时的参考值见 openpi `examples/aloha_real/README_ja.md` 第 6 节）：
 
    ```bash
-   torchrun --standalone --nnodes=1 --nproc_per_node=<GPU 数> scripts/train_pytorch.py <新 config 名> --exp_name=<新实验名>
+   uv run torchrun --standalone --nnodes=1 --nproc_per_node=<GPU 数> scripts/train_pytorch.py <新 config 名> --exp-name <新实验名>
    ```
 5. **部署**：和现在一样，`serve_policy.py --policy.config=<新 config 名> --policy.dir=<checkpoint 目录>/<新实验名>/<step>`。
 

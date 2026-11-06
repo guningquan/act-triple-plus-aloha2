@@ -7,15 +7,16 @@
 
 启动步骤与按键说明见 `README_run_robot.md`；只验证模型（不接管、不录制）用 `run_pi_policy.py` / `run_vtla_policy.py`。
 
-| 文件 | 作用 |
-|---|---|
-| `hil_rollout.py` | 主脚本：推理执行、状态机、录制 |
-| `policy_client.py` | websocket 客户端；openpi / N0 观测适配器（`run_vtla_policy.py` 也用它） |
-| `chunk_executor.py` | 动作 chunk 执行：每 `--action_horizon` 步阻塞推理一次（同 openpi aloha_real） |
-| `hil_devices.py` | 离合主臂（P 增益渐降释放、稳定检测、offset）、从臂指令与安全限制、按键/踏板 |
-| `hil_recorder.py` | hdf5 / VTLA 两种格式的写入 |
-| `hil_split_episodes.py` | 把 HIL episode 切成只含接管段（或自主段）的 episode |
-| `tests/` | 不接硬件的测试 |
+| 文件                      | 作用                                                                            |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| `hil_rollout.py`        | 主脚本：推理执行、状态机、录制                                                  |
+| `policy_client.py`      | websocket 客户端；openpi / N0 观测适配器（`run_vtla_policy.py` 也用它）       |
+| `chunk_executor.py`     | 动作 chunk 执行：每 `--action_horizon` 步阻塞推理一次（同 openpi aloha_real） |
+| `hil_devices.py`        | 离合主臂（P 增益渐降释放、稳定检测、offset）、从臂指令与安全限制、按键/踏板     |
+| `hil_recorder.py`       | hdf5 / VTLA 两种格式的写入                                                      |
+| `hil_split_episodes.py` | 把 HIL episode 切成只含接管段（或自主段）的 episode                             |
+| `hil_compare_lengths.py` | 量原数据和接管数据的长度，算接管数据占原数据的百分比、要复制几份才到 10% / 20%  |
+| `tests/`                | 不接硬件的测试                                                                  |
 
 ## 环境
 
@@ -59,13 +60,13 @@ python3 aloha_scripts/hil_rollout.py --task_name aloha2_tactile_test --policy n0
 
 ### 按键
 
-| 键 | 作用 |
-|---|---|
-| → | 开始；之后暂停 / 恢复策略 |
-| ← | 暂停时接管；接管中再按一次交还（回到暂停） |
+| 键        | 作用                                         |
+| --------- | -------------------------------------------- |
+| →        | 开始；之后暂停 / 恢复策略                    |
+| ←        | 暂停时接管；接管中再按一次交还（回到暂停）   |
 | e / Enter | 结束本条 → → 保存，← 丢弃，ESC 丢弃并退出 |
-| ESC / q | 结束本条，问完保存/丢弃后退出 |
-| b | 重新标定主臂夹爪力反馈零点 |
+| ESC / q   | 结束本条，问完保存/丢弃后退出                |
+| b         | 重新标定主臂夹爪力反馈零点                   |
 
 踏板如果模拟的是方向键，直接可用；evdev 踏板用 `--pedal_device /dev/input/by-id/...`
 （`--pedal_pause KEY_A --pedal_correct KEY_B --pedal_end KEY_C`）。
