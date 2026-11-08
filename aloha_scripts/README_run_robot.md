@@ -41,6 +41,8 @@ roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:="force"
 ```
 
 这个终端一直开着。没起触觉时，力反馈订阅不到数据只会警告（主臂夹爪保持 0 PWM），也可以加 `--no_force_feedback`。
+触觉 launch 启动时会给传感器清零，启动时不要碰传感器；`hil_rollout.py` 每条 episode 开始前也会清零一次
+（`--no_tactile_calibration` 关闭），触觉帧本身超过 `--max_tactile_age`（默认 0.2 s）时暂停策略。
 
 ### 终端 2（服务器）：起推理服务
 
@@ -396,6 +398,9 @@ openpi 不直接吃原始 hdf5，训练用的是 LeRobot 格式数据集（`serv
 | `--correction_blend_s` / `--correction_skip_s` | 0 / 0.2   | 接管开始的缓入（从上一条指令开始）/ 不标记时长                                  |
 | `--max_joint_step`                               | 0.1       | 从臂每 tick 关节最大变化（rad），0 关闭                                         |
 | `--max_stream_age`                               | 0.5       | 相机数据超过这个秒数就暂停策略                                                  |
+| `--max_tactile_age`                              | 0.2       | 触觉帧本身（按发布器的 `local_read_end` 算的数据年龄）超过这个秒数就暂停策略    |
+| `--no_tactile_calibration`                       | 关        | 每条 episode 开始前不给触觉清零                                                 |
+| `--tactile_jpeg_quality`                         | 90        | hdf5 格式：发布器以 raw 发来的触觉 rectify/difference 存成 JPEG 的质量          |
 | `--no_force_feedback`                            | 关        | 关闭主臂夹爪力反馈                                                              |
 | `--pedal_device`                                 | 无        | evdev 脚踏板（`--pedal_pause KEY_A --pedal_correct KEY_B --pedal_end KEY_C`） |
 
@@ -409,7 +414,8 @@ openpi 不直接吃原始 hdf5，训练用的是 LeRobot 格式数据集（`serv
 | `ModuleNotFoundError: msgpack` 等                     | 没激活环境：`conda activate aloha`（系统 Python 没有这些包）                                            |
 | `Warming up the policy server` 很久                   | openpi 首次推理在编译，正常；超过 `--warmup_timeout` 才报错                                             |
 | 执行中自动 `Paused (inference failed / no reply ...)` | 服务端报错或超时：看服务器终端；GPU 被占满时推理变慢，可调大 `--infer_timeout`                          |
-| 自动 `Paused (stale stream ...)`                      | 某路相机/触觉断流：检查终端 1 的 launch 输出、`rostopic hz /usb_cam_high/image_raw`                     |
+| 自动 `Paused (stale stream ...)`                      | 某路相机/触觉断流：检查终端 1 的 launch 输出、`rostopic hz /usb_cam_high/image_raw`、`rostopic hz /tactile/left_gripper_outer/raw` |
+| `/tactile/calibrate is not available` 后退出           | 触觉 launch 没起或发布器是旧版本：先起 `4arms_tactile_teleop.launch`；暂时不需要清零就加 `--no_tactile_calibration` |
 | `needs a terminal (stdin is not a tty)`               | 必须在交互终端里直接运行，不能放后台或重定向 stdin                                                        |
 | 从臂动作一顿一顿                                        | 每个 chunk 推理时会停顿一次（与 openpi aloha_real 相同）；推理慢时看服务器 GPU 是否被占                   |
 | `follower: command jumped ... limited`                | 策略输出或主臂读数单步跳变被限速，偶发可忽略，频繁出现要查原因                                            |

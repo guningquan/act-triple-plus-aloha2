@@ -18,6 +18,8 @@
 | `aloha_scripts/record_episodes_aloha2.py`   | 従来のACT形式のHDF5データセット（`episode_N.hdf5`）を記録する                                                                                  |
 | `aloha_scripts/replay_episodes.py`          | 記録済みHDF5エピソードの `/action` を実機の puppet アームで再生する（確認プロンプトなし・実際に動く）                                          |
 | `aloha_scripts/visualize_episodes_multi.py` | オフライン: qpos/qvel/effort/action の曲線をプロットし、記録済みエピソードのカメラフレームを書き出す                                             |
+| `aloha_scripts/check_episode_timing.py`     | オフライン: 記録した各ステップのカメラ・関節・触覚データがほぼ同じ時刻のものか、触覚データが新しかったかを確認する                               |
+| `aloha_scripts/tactile_stream.py`           | オプションの触覚サポート: 触覚パブリッシャーのトピックの共有リーダー（データ年齢の判定、ゼロ点校正サービス、runtime config）。単体のコマンドではない |
 | `detr/`                                     | モデル定義                                                                                                                                       |
 | `imitate_episodes_multi_gpu.py`             | ACT/TactileACT/Diffusion/CNNMLP ポリシーをマルチGPUで学習・評価する。実機評価にはキーボード操作（RIGHT/ESC/LEFT）あり                            |
 | `policy.py`                                 | ACT、DiffusionPolicy、CNNMLP、TactileACT 用のアダプタ                                                                                            |
@@ -74,6 +76,20 @@ roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:="force"
 必要な force フィールドが有効になります。`force_norm` を別途追加する必要は**ありません**（これは
 `force[..., 2]` を再度publishしているだけです）。触覚ハードウェアを使わない場合は、この触覚用launch
 コマンドをスキップし、以下のようにテレオペレーションと記録に `--no_force_feedback` を使ってください。
+
+触覚パブリッシャーはlaunch起動時に全センサーをゼロ点校正するので、**起動中はジェルに触れないでください**。
+各センサーのフレームはSDKが返した直後に送信されます（1センサーあたり最大60フレーム/秒）。既定の
+rectify + force では既定の `image_codec:=raw` のままにしてください。difference と depth も記録する場合は
+`extra_outputs` に追加します。3種類の画像をすべて有効にする場合は `image_codec:=jpeg` の方が追従が良く、
+新しいフレームが1センサーあたり毎秒約43から約52〜60に増えます。このリポジトリのスクリプトはどちらの
+方式にも対応しています。
+
+```sh
+roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:=difference,depth,force image_codec:=jpeg
+```
+
+launch引数・トピック・測定結果の一覧は、ROSワークスペースの `aloha` パッケージのREADME
+（`interbotix_ws_noetic/src/aloha/README.md`）を参照してください。
 
 2番目のターミナルで、何かする前にアームの状態を確認します。
 
@@ -224,6 +240,17 @@ force フィールドを提供していることを確認してください。�
 必要な場合のみタスク設定に `tactile_sensors` と `tactile_outputs` を追加し、触覚センサーのない
 セットアップでは外しておいてください。
 
+触覚センサーを使う場合（力フィードバック、またはタスク設定に `tactile_sensors` がある場合）:
+
+- 各エピソードの開始時に、フォロワーのグリッパーを開いた状態でパブリッシャー経由（`/tactile/calibrate`）で
+  センサーをゼロ点校正します。このときセンサーに触れないでください。`--no_tactile_calibration` で省略できます。
+- 触覚フレームが `--max_tactile_age`（既定0.2秒。受信時刻ではなくフレーム自体の年齢で判定）より古くなると、
+  記録を止めてそのエピソードを記録し直します。
+- 各ステップの触覚フレームはそのステップのカメラ画像・関節状態と同時に取得され、`--tactile_jpeg_quality`
+  （既定90）のJPEGで保存されます。パブリッシャーがすでにJPEGで送っているフレームはそのまま保存します。
+- 各HDF5エピソードには、ステップごとのタイムスタンプ（`/observations/timestamps`）と、そのゼロ点校正で
+  書き出された触覚の runtime config（`/metadata/tactile`）も保存されます。
+
 これにより両アームが開始姿勢に移動し、`→` が押されるまで記録開始を待機します。記録中:
 `→` で保存して早めに停止、`←` で破棄してこのエピソードをやり直し、`b` で（有効な場合）力フィード
 バックのベースラインを再ゼロ化、`ESC` で全体を中断します。エピソード間でアームは自動的にスリープ
@@ -244,6 +271,17 @@ python aloha_scripts/visualize_episodes_multi.py --dataset_dir <dataset_dir> --e
 qpos/qvel/effort/action の曲線をプロットし、カメラフレームを書き出します。ロボットは動きません。
 複数のインデックスを `--episode_idx 3,5,8` のように、または範囲を `--episode_idx 5-19` のように
 指定できます。
+
+記録したエピソードのタイミングを確認するには（データセットのディレクトリ、1つの `episode_N.hdf5`、
+VTLAのエピソードディレクトリのいずれにも使えます）:
+
+```sh
+python aloha_scripts/check_episode_timing.py <dataset_dir>
+```
+
+制御周期、カメラ・関節・触覚のデータ年齢、新しい触覚フレームを得たステップの割合、触覚センサー間の
+時間差について p50 / p95 / max を表示し、それぞれ PASS / WARN / FAIL で判定します。どれかが FAIL なら
+終了コードは1です。2026年11月より前に記録したエピソードにはタイムスタンプがないため確認できません。
 
 記録された `/action` が実際に実機のアームを正しく駆動することを確認するには、再生することができます
 ——**これは実際のpuppetアームを確認プロンプトなしで即座に動かします**:

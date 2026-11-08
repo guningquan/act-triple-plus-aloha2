@@ -48,9 +48,12 @@ def to_json(value):
 class Hdf5HilEpisode:
     def __init__(self, camera_names, tactile=None, encode_workers=4):
         self.camera_names = list(camera_names)
-        self.tactile = tactile  # record_episodes_aloha2.TactileRecorder or None
+        # record_episodes_aloha2.TactileRecorder or None. hil_rollout attaches it to the env, so each
+        # Frame carries its own tactile snapshot (frame.tactile), taken with that tick's images.
+        self.tactile = tactile
         self.qpos, self.qvel, self.effort, self.action = [], [], [], []
         self.phase, self.intervention, self.leader_action, self.times = [], [], [], []
+        self.tactile_samples, self.observation_stamps = [], []
         self.images = {camera: [] for camera in self.camera_names}
         self._pool = concurrent.futures.ThreadPoolExecutor(max_workers=encode_workers,
                                                            thread_name_prefix="hil-jpeg")
@@ -79,8 +82,11 @@ class Hdf5HilEpisode:
         self.intervention.append(int(bool(intervention)))
         self.leader_action.append(np.asarray(leader_action, dtype=np.float64))
         self.times.append(float(frame.time))
+        self.observation_stamps.append({"timestamps": getattr(frame, "timestamps", None) or {}})
         if self.tactile is not None:
-            self.tactile.sample()
+            if getattr(frame, "tactile", None) is None:
+                raise RuntimeError("frame carries no tactile snapshot (attach the TactileRecorder as env.tactile)")
+            self.tactile_samples.append(frame.tactile)
 
     def close(self):
         """Release the encoder threads and the tactile subscriptions (after save() or a discard)."""
@@ -88,9 +94,14 @@ class Hdf5HilEpisode:
         if self.tactile is not None:
             self.tactile.close()
 
-    def save(self, path, attrs=None):
-        """Write <path> (".hdf5" appended if missing) and return the number of timesteps."""
+    def save(self, path, attrs=None, tactile_config=None):
+        """Write <path> (".hdf5" appended if missing) and return the number of timesteps.
+
+        tactile_config: the /tactile/runtime_config blob of this episode's zeroing (or None).
+        """
         import h5py
+
+        from tactile_hdf5 import observation_timestamps, write_tactile, write_tactile_metadata, write_timestamps
 
         if not path.endswith(".hdf5"):
             path += ".hdf5"
@@ -100,9 +111,11 @@ class Hdf5HilEpisode:
         encoded = {camera: [future.result() for future in self.images[camera]] for camera in self.camera_names}
         compressed_len = np.array([[len(e) for e in encoded[camera]] for camera in self.camera_names])
         padded_size = int(compressed_len.max()) if self.camera_names else 0
+        timestamps = observation_timestamps(self.observation_stamps)
         tactile_packed, tactile_lengths = {}, {"entries": [], "lens": None}
         if self.tactile is not None:
-            tactile_packed, tactile_lengths = self.tactile.pack(episode_len, compress=True)
+            tactile_packed, tactile_lengths = self.tactile.pack(self.tactile_samples, compress=True)
+            timestamps["tactile"] = self.tactile.timing(self.tactile_samples)
 
         with h5py.File(path, "w", rdcc_nbytes=1024 ** 2 * 2) as root:
             root.attrs["sim"] = False
@@ -124,20 +137,13 @@ class Hdf5HilEpisode:
             if self.camera_names:
                 root.create_dataset("compress_len", (len(self.camera_names), episode_len))[...] = compressed_len
 
-            # Same layout as record_episodes_aloha2.py's /observations/tactile
-            if tactile_packed:
-                tactile_group = obs.create_group("tactile")
-                for sensor_name, fields in tactile_packed.items():
-                    sensor_group = tactile_group.create_group(sensor_name)
-                    for field_name, entry in fields.items():
-                        dataset = sensor_group.create_dataset(
-                            field_name, data=entry["data"],
-                            chunks=(1,) + entry["data"].shape[1:] if entry["data"].ndim > 1 else None)
-                        dataset.attrs["compressed"] = entry["compressed"]
-                        dataset.attrs["frame_shape"] = np.array(entry["shape"], dtype="int64")
-                if tactile_lengths["entries"]:
-                    lengths = tactile_group.create_dataset("compress_len", data=tactile_lengths["lens"])
-                    lengths.attrs["entries"] = tactile_lengths["entries"]
+            # Same layout as record_episodes_aloha2.py: /observations/tactile, /observations/timestamps
+            # and /metadata/tactile (tactile_hdf5.py)
+            write_tactile(obs, tactile_packed, tactile_lengths)
+            write_timestamps(obs, timestamps)
+            if tactile_packed or tactile_config is not None:
+                write_tactile_metadata(root, tactile_config,
+                                       self.tactile.settings() if self.tactile is not None else None)
 
             hil = root.create_group("hil")
             hil.create_dataset("phase", data=np.asarray(self.phase, dtype=np.uint8))
@@ -174,15 +180,18 @@ class VtlaHilEpisode:
     def close(self):
         pass
 
-    def save(self, destination, attrs=None, overwrite=False):
-        from record_episodes_aloha2_vtla import export_episode
+    def save(self, destination, attrs=None, overwrite=False, tactile_config=None):
+        from record_episodes_aloha2_vtla import export_episode, tactile_config_extras
 
         if len(self.samples) < 2:
             raise ValueError("episode too short")
         hil_values = np.stack([self.phase, self.intervention], axis=1)
+        extra_metadata = {"hil": json.loads(to_json(attrs or {}))}
+        extra_files, tactile_metadata = tactile_config_extras(tactile_config)
+        extra_metadata.update(tactile_metadata)
         metadata = export_episode(destination, self.samples, self.models, self.sources, self.task,
                                   overwrite=overwrite, calibration=self.calibration,
                                   action_space=self.action_space,
                                   extra_csvs={"hil": (("phase", "intervention"), hil_values)},
-                                  extra_metadata={"hil": json.loads(to_json(attrs or {}))})
+                                  extra_metadata=extra_metadata, extra_files=extra_files)
         return metadata["total_frames"]

@@ -40,6 +40,42 @@ roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:="force"
 - `constants.py` 里 `DATA_DIR` 是按 `os.getlogin()` 用户名写死的两条路径；如果你的登录用户名
   不是 `guningquan` 或 `ubuntu20`，第一次跑任何脚本都会直接 `ValueError: Unknown user`，需要先
   在 `constants.py` 顶部加一条你自己的用户名分支。
+- **启动 launch 时不要碰触觉传感器**：触觉发布器启动时会先清零（`calibrate_on_start:=true`，默认）。
+- 触觉发布方式（2026-11 起）：每帧在 SDK 读出后立刻由该传感器自己的线程发送（`publish_mode:=on_new_frame`，
+  默认；最多 `max_rate_hz:=60` 帧/秒，不重复发同一帧）。`/raw` 的 `meta` 里有 `local_read_end`（SDK 交出这帧的
+  主机时间）、`timestamp`、`seq`。`image_codec:=jpeg` 可以让 rectify/difference 以 JPEG 发送（默认 `raw`，与以前
+  相同）。旧的定时发送可用 `publish_mode:=timer` 恢复。
+- raw 还是 jpeg（2026-11-08 在这台电脑上实测）：
+  - 默认的 rectify+force 用 `raw`：50 Hz 录制循环 98% 的步拿到新帧，帧龄 p50 9 ms / p95 19 ms / 最大 37 ms。
+  - 三种图像（rectify、difference、depth）全开时用 `jpeg`：每个传感器每秒新帧 raw 约 43，jpeg 52–60。
+  - 录制脚本两种都能用；存进 HDF5 的都是 JPEG q90，文件一样。jpeg 的好处是录制时内存小（rectify 每帧
+    0.84 MB → 约 28 KB），保存时也不用再编码。
+
+  ```bash
+  # 三种图像全开，不压缩 / 压缩
+  roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:=difference,depth,force
+  roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:=difference,depth,force image_codec:=jpeg
+  ```
+
+- 发布器每 60 s 打印一行心跳：`<sensor> read .. ms, new ../s, sent ../s`，`new` 是每秒从 SDK 读到的新帧数。
+  对比不同设置时加 `stats_log_period_s:=5` 改成每 5 s 一行；不接机械臂只测传感器加 `launch_driver:=false`。
+- 相机保持发原始图（`image_raw`）。在同一台电脑上压缩（JPEG q90）实测延时 p50 从 1.9 ms 变成 3.7 ms，4 个相机节点
+  CPU 从 28% 变成 96%，只有跨机器传才值得压缩；录制脚本也只读 `image_raw`。
+- 全部 launch 参数、话题格式和实测数据见 ROS 工作空间里 `aloha` 包的 README（`interbotix_ws_noetic/src/aloha/README.md`）。
+
+### 1.1 触觉数据在下游怎么用（2026-11 起）
+
+- 所有脚本通过 `tactile_stream.py` 共用触觉订阅：同一进程里每个话题只订阅一次、只解包一次；raw 和 jpeg
+  两种发送方式都能直接用。
+- **帧龄按数据本身算**（现在 − `local_read_end`），不是按收到消息的时间。录制脚本里触觉帧龄超过
+  `--max_tactile_age`（默认 0.2 s）就**停止这一条并重录**；`hil_rollout.py` 会暂停策略；力反馈输出 0 PWM。
+- **每条 episode 开始时自动清零**（调用 `/tactile/calibrate`，在力反馈测基线之前，此时夹爪张开、不要碰传感器）；
+  `--no_tactile_calibration` 可以关掉。清零后导出的 runtime config 随 episode 一起保存。
+  - 找不到 `/tactile/calibrate`（触觉 launch 没起，或发布器是旧版本）时脚本会报错退出。
+  - 加了 `--no_tactile_calibration` 时，改用 launch 启动时那次清零导出的 runtime config：最多等 3 s，收不到就打印警告，
+    这条 episode 不带 runtime config 保存。
+- 力反馈的滤波按时间计算（`--force_filter` 仍是"每 1/60 秒"的系数），手感不受消息频率和控制频率影响。
+- 录完可以用 `check_episode_timing.py` 检查时间对齐（见 7.1）。
 
 ## 2. 硬件自检
 
@@ -215,6 +251,19 @@ python aloha_scripts/record_episodes_aloha2.py \
   反馈零点。
 - 主臂力反馈默认开启，参数就是第 5/6 节调出来的那一套 `--force_*`/`--wall_*`/`--close_*`；
   `--no_force_feedback` 可以整体关掉。
+- 触觉（2026-11 起）：每一步的触觉和相机、关节在同一次 `get_observation()` 里取（以前是 `env.step()` 之后才取，
+  比相机晚一个控制步）。触觉图像以 JPEG 质量 `--tactile_jpeg_quality`（默认 90，以前是 50）保存；发布器用
+  `image_codec:=jpeg` 时直接保存收到的 JPEG，不再二次编码。`--max_tactile_age`、`--no_tactile_calibration`
+  见 1.1 节。
+- HDF5 里新增 `/observations/timestamps/`（每步的观测时间、相机/关节 header 时间、控制循环时间、每个触觉帧的
+  `timestamp`/`read_start`/`read_end`/`frame_age`/`seq`/`new_frame`）和 `/metadata/tactile/`（清零后导出的 runtime
+  config、SDK 版本、发布器设置）。布局见 `tactile_hdf5.py`。录完检查：
+
+  ```bash
+  python aloha_scripts/check_episode_timing.py <dataset_dir 或 episode_N.hdf5>
+  ```
+
+  它统计控制周期、相机/关节延时、触觉帧龄、拿到新触觉帧的比例、4 个传感器之间的时间差，给出 PASS/WARN/FAIL。
 
 ### 7.2 面向 N0-VTLA 的录制（`record_episodes_aloha2_vtla.py`）
 
@@ -230,8 +279,11 @@ python3 aloha_scripts/record_episodes_aloha2_vtla.py \
 自保持原始分辨率，30fps H.264），而不是单个 HDF5；这个目录格式是给另一个仓库的
 `convert_canonical_data.py --robot aloha` 转换成 N0-VTLA 训练用的 LeRobot 数据集。
 
-- 必须同时有 3 路相机和 4 路触觉 `rectify` 在正常发布，缺一个或者超过 `--max_stream_age`
-  （默认 0.5s）没收到新消息就直接报错停止，不会保存残缺的 episode。
+- 必须同时有 3 路相机和 4 路触觉 `rectify` 在正常发布。相机/关节缺失或超过 `--max_stream_age`（默认 0.5 s）
+  没收到新消息、触觉帧本身超过 `--max_tactile_age`（默认 0.2 s，按数据年龄算）时，停止这一条并重录，不会保存
+  残缺的 episode。
+- 每条开始时同样自动清零（`--no_tactile_calibration` 关闭），runtime config 存在
+  `episode_N/tactile_runtime_config/`。
 - `--aloha-action-space eef`（默认）额外保存 20 维 EEF 位姿 CSV；`joint_position` 只存 14 维
   关节 CSV，跳过正运动学计算。
 - `--save_force` 可以额外保存 4 路 `(T,35,20,3)` 的原始力场 NPY（需要 roslaunch 时
@@ -287,8 +339,10 @@ python3 aloha_scripts/run_vtla_policy.py --host <server_ip> --port 8000 \
   闭环。
 - 真实运行时每隔 `--action_horizon`（默认 50）步重新查询一次策略，`--max_episode_steps`/
   `--num_episodes` 控制单条/总共跑多久多少条。
-- 图像/触觉的色彩通道处理跟录制脚本刻意不同（训练数据过了一次视频编解码，推理这里是直接读
-  SDK 原始字节），这属于实现细节，正常使用不需要关心，改的话看脚本顶部的模块说明。
+- 图像/触觉的色彩通道处理跟录制脚本刻意不同（训练数据过了一次视频编解码，推理这里直接用发布器的
+  RGB；发布器用 `image_codec:=jpeg` 时先解码再转 RGB），这属于实现细节，正常使用不需要关心，改的话看脚本
+  顶部的模块说明。
+- 触觉帧本身超过 `--max_tactile_age`（默认 0.2 s）就不用它；每条开始时的触觉基线只用归位之后的新帧。
 
 ## 10. 常见坑
 
@@ -303,4 +357,4 @@ python3 aloha_scripts/run_vtla_policy.py --host <server_ip> --port 8000 \
 - **`replay_episodes.py` 没有确认提示**：见第 8 节的安全提示，跑之前自己确认好现场安全。
 - **`extra_outputs` 决定触觉字段是否可用**：`roslaunch` 时没带 `force`，力反馈会一直是 0 PWM
   并打印警告，不会报错；没带你想录的字段（比如某任务配了 `tactile_outputs` 里有
-  `force_norm`）会在录制时报警告并用 0 填充，不影响其他字段正常保存。
+  `force_norm`）会在开始录制前警告，这个字段不会保存（不再用 0 填充），不影响其他字段正常保存。

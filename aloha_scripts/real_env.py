@@ -64,6 +64,10 @@ class RealEnv:
         self.recorder_right = Recorder('right', init_node=False)
         self.image_recorder = ImageRecorder(init_node=False)
         self.gripper_command = JointSingleCommand(name="gripper")
+        # Optional record_episodes_aloha2.TactileRecorder. When set, get_observation() adds its
+        # snapshot as obs['tactile'], taken in the same call as the images and joint states, so a
+        # recorder that stores observations gets tactile aligned with them by construction.
+        self.tactile = None
 
     def setup_robots(self):
         setup_puppet_bot(self.puppet_bot_left)
@@ -123,12 +127,29 @@ class RealEnv:
             move_time=1,
         )
 
+    def get_timestamps(self):
+        """When this observation was assembled, and the header stamps of the data in it."""
+        def stamp(recorder, prefix=""):
+            secs = getattr(recorder, prefix + "secs", None)
+            nsecs = getattr(recorder, prefix + "nsecs", None)
+            return float("nan") if secs is None or nsecs is None else secs + nsecs * 1e-9
+
+        return {
+            "local_time": time.time(),
+            "images": {cam: stamp(self.image_recorder, cam + "_") for cam in self.image_recorder.camera_names},
+            "joints": {"left": stamp(self.recorder_left), "right": stamp(self.recorder_right)},
+        }
+
     def get_observation(self):
         obs = collections.OrderedDict()
         obs['qpos'] = self.get_qpos()
         obs['qvel'] = self.get_qvel()
         obs['effort'] = self.get_effort()
         obs['images'] = self.get_images()
+        obs['timestamps'] = self.get_timestamps()
+        if self.tactile is not None:
+            # Raises tactile_stream.TactileStale when a sensor's newest frame is too old.
+            obs['tactile'] = self.tactile.snapshot()
         return obs
 
     def get_reward(self):

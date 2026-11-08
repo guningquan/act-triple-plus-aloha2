@@ -148,6 +148,9 @@ class Recorder:
         self.qvel = data.velocity
         self.effort = data.effort
         self.data = data
+        # Header stamp of the latest joint state, for RealEnv.get_timestamps().
+        self.secs = data.header.stamp.secs
+        self.nsecs = data.header.stamp.nsecs
         if self.is_debug:
             self.joint_timestamps.append(time.time())
 

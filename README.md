@@ -19,6 +19,8 @@ for ALOHA / ALOHA2 robot systems, with **optional tactile sensing and leader-gri
 | `aloha_scripts/record_episodes_aloha2.py`   | Record a classic ACT-style HDF5 dataset (`episode_N.hdf5`)                                                                           |
 | `aloha_scripts/replay_episodes.py`          | Replay a recorded HDF5 episode's `/action` on the real puppet arms (no confirmation prompt - real motion)                            |
 | `aloha_scripts/visualize_episodes_multi.py` | Offline: plot qpos/qvel/effort/action curves and dump camera frames from a recorded episode                                            |
+| `aloha_scripts/check_episode_timing.py`     | Offline: check that each recorded step's cameras, joints and tactile data are from about the same moment, and that tactile data was fresh |
+| `aloha_scripts/tactile_stream.py`           | Optional tactile support: shared reader of the tactile publisher's topics (data-age checks, zeroing service, runtime config); not a standalone command |
 | `detr/`                                     | Model definitions                                                                                                                      |
 | `imitate_episodes_multi_gpu.py`             | Train and evaluate ACT/TactileACT/Diffusion/CNNMLP policies, multi-GPU; real-robot eval has keyboard control (RIGHT/ESC/LEFT)          |
 | `policy.py`                                 | Adaptor for ACT, DiffusionPolicy, CNNMLP, and TactileACT                                                                               |
@@ -76,6 +78,20 @@ leader-gripper force feedback or raw force recording; `force_norm` does **not** 
 added separately (it is just `force[..., 2]` published again). Without tactile hardware,
 skip this tactile launch command and use `--no_force_feedback` for teleoperation and recording
 as shown below.
+
+The tactile publisher zeroes every sensor when the launch starts, so **do not touch the gels while it
+starts**. It sends each sensor's frames as soon as the SDK delivers them, at most 60 per second per
+sensor. For the default rectify + force, keep the default `image_codec:=raw`. To also record
+difference and depth, add them to `extra_outputs`; with all three images on, `image_codec:=jpeg` keeps
+up better (about 52–60 instead of 43 new frames per second per sensor). The scripts in this repo
+handle both codecs:
+
+```sh
+roslaunch aloha 4arms_tactile_teleop.launch extra_outputs:=difference,depth,force image_codec:=jpeg
+```
+
+All launch arguments, topics and measurements are in the `aloha` package README of the ROS
+workspace (`interbotix_ws_noetic/src/aloha/README.md`).
 
 In a second terminal, sanity-check the arms before touching anything:
 
@@ -224,6 +240,18 @@ publisher provides the force field. Recording raw tactile arrays is configured s
 add `tactile_sensors` and `tactile_outputs` to your task config only when needed, and leave
 them out for a setup without tactile sensors.
 
+When tactile sensors are in use (force feedback, or `tactile_sensors` in the task config):
+
+- Each episode starts by zeroing the sensors through the publisher (`/tactile/calibrate`) while the
+  follower grippers are open. Do not touch the sensors then. `--no_tactile_calibration` skips it.
+- If a tactile frame is older than `--max_tactile_age` (default 0.2 s, judged by the frame's own age,
+  not by when it arrived), recording stops and the episode is recorded again.
+- Each step's tactile frame is taken together with its camera images and joint states, and stored as
+  JPEG at `--tactile_jpeg_quality` (default 90). Frames the publisher already sends as JPEG are
+  stored as they are.
+- Each HDF5 episode also stores per-step timestamps (`/observations/timestamps`) and the tactile
+  runtime config exported by that zeroing (`/metadata/tactile`).
+
 This moves both arms to the start pose, then waits for `→` to begin recording. During recording:
 `→` save and stop early, `←` discard and redo this episode, `b` re-zero the force-feedback
 baseline (when enabled), `ESC` abort the whole run. Between episodes the arms automatically move to the sleep
@@ -243,6 +271,18 @@ python aloha_scripts/visualize_episodes_multi.py --dataset_dir <dataset_dir> --e
 
 Plots qpos/qvel/effort/action curves and dumps camera frames; does not move the robot. Pass
 multiple indices as `--episode_idx 3,5,8` or a range as `--episode_idx 5-19`.
+
+To check the timing of recorded episodes (works on a dataset directory, one `episode_N.hdf5`, or a
+VTLA episode directory):
+
+```sh
+python aloha_scripts/check_episode_timing.py <dataset_dir>
+```
+
+It prints p50 / p95 / max of the control period, the camera, joint and tactile data ages, the share of
+steps that got a new tactile frame, and the time spread between tactile sensors, each judged
+PASS / WARN / FAIL. The exit status is 1 if anything fails. Episodes recorded before 2026-11 have no
+timestamps to check.
 
 To confirm the recorded `/action` actually drives the real arms correctly, you can replay it —
 **this moves the real puppet arms immediately, with no confirmation prompt**:

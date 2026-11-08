@@ -146,7 +146,7 @@ def test_main_records_a_takeover_episode(tmp_path, monkeypatch):
 
 
 class FakeLiveStreams:
-    def __init__(self, sources, arm_names, calibration, save_force):
+    def __init__(self, sources, arm_names, calibration, save_force, max_tactile_age=None):
         self.sources = sources
         self.count = 0
 

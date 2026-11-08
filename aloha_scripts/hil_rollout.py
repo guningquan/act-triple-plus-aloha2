@@ -46,6 +46,8 @@ import numpy as np
 
 from chunk_executor import ChunkExecutor, PolicyError
 from hil_recorder import PHASE_AUTONOMOUS, PHASE_CORRECTING, PHASE_PAUSED
+from tactile_stream import (DEFAULT_MAX_TACTILE_AGE_S, TactileStale, calibrate_sensors, current_runtime_config,
+                            topic_for)
 
 PHASE_NAMES = {PHASE_AUTONOMOUS: "autonomous", PHASE_PAUSED: "paused", PHASE_CORRECTING: "correcting"}
 # Progress-line colour by phase: green while the policy drives, yellow while paused/waiting for a
@@ -412,7 +414,13 @@ def build_parser():
     safety.add_argument("--max_joint_step", type=float, default=0.1,
                         help="Per-tick follower arm joint change limit (rad, 50 Hz); 0 disables")
     safety.add_argument("--max_stream_age", type=float, default=0.5, help="Pause the policy on older camera data")
+    safety.add_argument("--max_tactile_age", type=float, default=DEFAULT_MAX_TACTILE_AGE_S,
+                        help="Pause the policy on tactile frames older than this (s), by the data's own age")
     safety.add_argument("--stream_timeout", type=float, default=5.0)
+    safety.add_argument("--tactile_jpeg_quality", type=int, default=90,
+                        help="hdf5 format: JPEG quality for tactile rectify/difference sent raw by the publisher")
+    safety.add_argument("--no_tactile_calibration", action="store_true",
+                        help="Do not re-zero the tactile sensors (/tactile/calibrate) before each episode")
 
     haptics = parser.add_argument_group("leader-gripper force feedback (record_episodes_aloha2.py defaults)")
     haptics.add_argument("--no_force_feedback", action="store_true")
@@ -518,7 +526,8 @@ def main(argv=None):
         sources = vtla.video_sources(args.third_camera, tactile_map)
         vtla.check_video_tools()
         arm_names = (env.puppet_bot_left.arm.group_info.joint_names, env.puppet_bot_right.arm.group_info.joint_names)
-        streams = vtla.LiveStreams(sources, arm_names, calibration, save_force=False)
+        streams = vtla.LiveStreams(sources, arm_names, calibration, save_force=False,
+                                   max_tactile_age=args.max_tactile_age)
         streams.wait_ready(args.stream_timeout, args.max_stream_age)
 
     if args.policy == "openpi":
@@ -535,7 +544,12 @@ def main(argv=None):
                 stamp, vtla_snapshot = streams.snapshot(args.max_stream_age)
             except RuntimeError as exc:
                 raise StaleStream(str(exc))
-        obs = env.get_observation()
+        try:
+            # With a TactileRecorder attached (hdf5 format with tactile), obs['tactile'] is taken
+            # here, with the images, and a too-old tactile frame raises TactileStale.
+            obs = env.get_observation()
+        except TactileStale as exc:
+            raise StaleStream(str(exc))
         if require_fresh and args.policy == "openpi":
             recorder = env.image_recorder
             now = rospy.get_time()
@@ -546,7 +560,8 @@ def main(argv=None):
                 age = now - (secs + getattr(recorder, camera + "_nsecs") * 1e-9)
                 if age > args.max_stream_age:
                     raise StaleStream("{} image is {:.2f}s old".format(camera, age))
-        return Frame(stamp, obs["qpos"], obs["qvel"], obs["effort"], obs["images"], vtla_snapshot)
+        return Frame(stamp, obs["qpos"], obs["qvel"], obs["effort"], obs["images"], vtla_snapshot,
+                     tactile=obs.get("tactile"), timestamps=obs.get("timestamps"))
 
     def infer(frame, timeout=None):
         obs = adapter.prepare(frame)
@@ -578,7 +593,26 @@ def main(argv=None):
                     feedback, brake = legacy.build_haptics_config(vars(args), side)
                     haptics[i] = legacy.ArmHaptics(bot, side, feedback, brake, torque_gate=not args.no_torque_gate)
                     haptics[i].wait_for_data()
-                for arm in haptics:
+            tactile = None
+            if args.format == "hdf5" and task.get("tactile_sensors") and task.get("tactile_outputs"):
+                tactile = legacy.TactileRecorder(task["tactile_sensors"], task["tactile_outputs"],
+                                                 max_age_s=args.max_tactile_age, jpeg_quality=args.tactile_jpeg_quality)
+                tactile.wait_for_data()
+            # As record_episodes_aloha2.py: re-zero every tactile sensor in use (followers at the start
+            # pose, grippers open, so nothing touches the gels) before the force baseline is taken, and
+            # keep the runtime config that zeroing exports for the episode file.
+            in_use = {topic_for(name) for name in getattr(tactile, "sensor_names", None) or ()}
+            in_use |= {topic_for(name) for name in getattr(streams, "tactile_names", None) or ()}
+            in_use |= {topic_for(arm.feedback.topic) for arm in haptics if getattr(arm, "feedback", None) is not None}
+            tactile_config = None
+            if in_use:
+                if args.no_tactile_calibration:
+                    tactile_config = current_runtime_config()
+                else:
+                    print("Zeroing the tactile sensors - nothing may touch them...")
+                    tactile_config = calibrate_sensors(sorted(in_use))
+            for arm in haptics:
+                if arm is not None:
                     arm.calibrate(args.force_baseline_samples)
             clutch = dict(release_ramp_s=args.release_ramp_s, relative=not args.absolute_takeover,
                           settle_s=args.settle_s, settle_tolerance=args.settle_tolerance,
@@ -590,11 +624,11 @@ def main(argv=None):
                                          clip_gripper=args.format == "vtla")
             executor = ChunkExecutor(infer, adapter.policy_hz, DT, action_horizon=args.action_horizon)
             if args.format == "hdf5":
-                tactile = None
-                if task.get("tactile_sensors") and task.get("tactile_outputs"):
-                    tactile = legacy.TactileRecorder(task["tactile_sensors"], task["tactile_outputs"])
-                    tactile.wait_for_data()
                 recorder = Hdf5HilEpisode(camera_names, tactile=tactile)
+                if tactile is not None:
+                    # capture() -> env.get_observation() now carries this episode's tactile snapshots
+                    tactile.reset()
+                    env.tactile = tactile
             else:
                 models = puppets[0].arm.robot_des, puppets[1].arm.robot_des
                 recorder = VtlaHilEpisode(sources, models, calibration, args.aloha_action_space,
@@ -631,6 +665,7 @@ def main(argv=None):
                           .format(reason, session.steps, session.active_steps, len(recorder), session.corrections,
                                   session.skipped_frames, executor.stats()))
             finally:
+                env.tactile = None
                 executor.close()
                 if not leaders.locked:
                     leaders.lock()
@@ -652,7 +687,8 @@ def main(argv=None):
                 attrs = {"policy": args.policy, "prompt": args.prompt or "", "server": client.uri,
                          "server_metadata": client.metadata, "settings": settings, "task_name": args.task_name}
                 try:
-                    count = recorder.save(str(root / name) if args.format == "hdf5" else root / name, attrs)
+                    count = recorder.save(str(root / name) if args.format == "hdf5" else root / name, attrs,
+                                          tactile_config=tactile_config)
                 except Exception as exc:
                     print("Saving {} failed ({}); recording it again.".format(name, exc))
                 else:

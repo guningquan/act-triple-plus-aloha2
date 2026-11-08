@@ -163,6 +163,9 @@ def split_vtla(src, segments, destinations):
             target = temporary / array.relative_to(src)
             target.parent.mkdir(parents=True, exist_ok=True)
             np.save(str(target), np.load(str(array))[start:end], allow_pickle=False)
+        # Per-episode, not per-frame: every segment keeps the tactile runtime configs as they are.
+        if (src / "tactile_runtime_config").is_dir():
+            shutil.copytree(str(src / "tactile_runtime_config"), str(temporary / "tactile_runtime_config"))
         segment_metadata = dict(metadata, episode_id=destination.name, total_frames=end - start,
                                 hil_source={"episode": str(src), "start": start, "end": end})
         (temporary / "metadata.json").write_text(

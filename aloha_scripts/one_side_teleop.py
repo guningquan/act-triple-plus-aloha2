@@ -45,9 +45,10 @@ CHANGES since the pre-force-feedback version (kept alongside as "one_side_teleop
    agree and nothing jumps when teleoperation begins.
 
 3. Tactile force feedback on the leader gripper (the bulk of the new code)
-   GripperForceFeedback subscribes to /tactile/<side>_gripper_outer/raw (the pickled bundle
-   from 4arms_tactile_teleop.launch, needs extra_outputs containing "force") and maps
-   frames["force"][..., 2] - the normal component - onto a leader-gripper Goal_PWM.
+   GripperForceFeedback reads /tactile/<side>_gripper_outer/raw (the pickled bundle from
+   4arms_tactile_teleop.launch, needs extra_outputs containing "force"; through the shared
+   tactile_stream.TactileStream) and maps frames["force"][..., 2] - the normal component -
+   onto a leader-gripper Goal_PWM, filtering on time and judging staleness by the frame's own age.
    The leader gripper motor is an XC430-W150-T: PWM mode only, no current control, and
    interbotix's own helper opens with a positive command, so positive PWM is the direction
    that resists the operator closing.
@@ -102,7 +103,6 @@ were tuned on the bench.
 
 import argparse
 import os
-import pickle
 import select
 import sys
 import termios
@@ -111,10 +111,8 @@ import time
 import tty
 
 import numpy as np
-import rospy
 from interbotix_xs_modules.arm import InterbotixManipulatorXS
 from interbotix_xs_msgs.msg import JointSingleCommand
-from std_msgs.msg import UInt8MultiArray
 
 # Dual-mode: works both run directly (python aloha_scripts/one_side_teleop.py ..., aloha_scripts/
 # itself on sys.path, flat imports resolve) and imported as aloha_scripts.one_side_teleop from a
@@ -139,6 +137,7 @@ try:
         PUPPET_SLEEP_POSITION, MASTER_SLEEP_POSITION,
         SHUTDOWN_SPEED_SCALE, move_shut_robot,
     )
+    from aloha_scripts.tactile_stream import TactileStream
 except ImportError:
     from constants import DT, START_ARM_POSE
     from constants import MASTER2PUPPET_LEFT_JOINT_FN, MASTER2PUPPET_RIGHT_JOINT_FN
@@ -152,6 +151,7 @@ except ImportError:
         PUPPET_SLEEP_POSITION, MASTER_SLEEP_POSITION,
         SHUTDOWN_SPEED_SCALE, move_shut_robot,
     )
+    from tactile_stream import TactileStream
 
 DEFAULT_ARM_COMMAND_MOVE_TIME = DT
 DEFAULT_PREP_ARM_MOVE_TIME = 2.0
@@ -194,6 +194,12 @@ DEFAULT_FORCE_CURVE = 2.0
 DEFAULT_MAX_FEEDBACK_PWM = 250
 DEFAULT_FORCE_TIMEOUT_S = 0.3
 DEFAULT_FORCE_FILTER = 0.3
+# The force filter's alpha is "per 1/60 s": it was tuned when every /raw message - 60 per second
+# from the old fixed-rate publisher, repeats included - advanced the filter one step. The filter
+# now runs on time (see GripperForceFeedback.command), so the same alpha gives the same time
+# constant whatever the message rate (the publisher now sends each frame once, as it arrives) and
+# whatever the control loop's tick rate.
+FORCE_FILTER_RATE_HZ = 60.0
 # Resting offset removal: average this many frames right after the feedback goes live (nothing
 # grasped yet) and subtract it, so a sensor bias never becomes constant resistance.
 DEFAULT_FORCE_BASELINE_SAMPLES = 30
@@ -330,8 +336,8 @@ class KeyboardControl:
 class GripperForceFeedback:
     """Turns the puppet-side tactile normal force into a leader-gripper Goal_PWM.
 
-    Subscribes to the pickled /tactile/<sensor>/raw bundle published by
-    4arms_tactile_teleop.launch and reads frames[field][..., 2] - the normal component; channels
+    Reads the pickled /tactile/<sensor>/raw bundle published by
+    4arms_tactile_teleop.launch and uses frames[field][..., 2] - the normal component; channels
     0 and 1 are the shear components. The scalar it reduces that field to becomes PWM in these
     steps:
 
@@ -366,6 +372,13 @@ class GripperForceFeedback:
     hand. `sign` is +1 by default: the opening direction, the one that resists closing. Stale
     tactile data commands 0 PWM - nobody should be left pushing against a frozen command from a
     dead publisher - and so does being paused (deactivate()).
+
+    The topic is read through the process-wide tactile_stream.TactileStream (shared with any
+    recorder in the same process). Everything happens in command(), once per control tick: it
+    takes the newest frame, advances the EMA by the time since the last tick (filter_alpha is per
+    1/60 s, FORCE_FILTER_RATE_HZ), and judges staleness by the frame's own age
+    (now - the publisher's local_read_end), so neither the message rate nor the tick rate changes
+    how the feedback feels, and a publisher re-sending an old frame still reads as stale.
     """
 
     def __init__(self, topic, deadband, full_scale, curve, max_pwm, timeout_s, filter_alpha,
@@ -392,64 +405,68 @@ class GripperForceFeedback:
         self.sign = 1 if sign >= 0 else -1
         self.ramp_s = ramp_s
         self.baseline = 0.0
-        self._lock = threading.Lock()
         self._force = 0.0
-        self._stamp = 0.0
-        self._frames = 0
-        self._samples = []
+        self._filter_time = None   # host time of the last EMA step
+        self._value = None         # metric of the newest frame, and which frame it came from
+        self._value_count = None
         self._active_since = None
         self._warned_missing = False
-        # The payload also carries a (700, 400, 3) preview image, so give the transport a big
-        # buffer - a small one queues frames and the haptics start lagging seconds behind.
-        self._sub = rospy.Subscriber(
-            topic, UInt8MultiArray, self._callback, queue_size=1, buff_size=2 ** 24, tcp_nodelay=True
-        )
+        self._stream = TactileStream.acquire(topic)
 
-    def _callback(self, msg):
-        try:
-            payload = pickle.loads(bytes(msg.data))
-        except Exception as exc:
-            rospy.logwarn_throttle(5.0, f"tactile feedback: cannot unpickle {self.topic}: {exc}")
-            return
-        values = payload.get("frames", {}).get(self.field)
+    def _metric_of(self, frame):
+        """The scalar this feedback reduces a frame's field to, or None if the frame lacks it."""
+        values = frame.field(self.field)
         if values is None:
             if not self._warned_missing:
                 self._warned_missing = True
                 print(f"Warning: {self.topic} carries no {self.field!r}. Relaunch with "
                       f"extra_outputs containing it, or force feedback stays at 0 PWM.")
-            return
+            return None
         array = np.asarray(values, dtype=np.float64)
         normal = (array[..., FORCE_NORMAL_CHANNEL]
                   if array.ndim == 3 and array.shape[-1] == 3 else array)
-        value = self._metric(normal)
-        with self._lock:
-            alpha = self.filter_alpha
-            self._force = value if self._frames == 0 else (1 - alpha) * self._force + alpha * value
-            self._stamp = time.time()
-            self._frames += 1
-            self._samples.append(value)
-            if len(self._samples) > 200:
-                del self._samples[:-200]
+        return self._metric(normal)
+
+    def _newest(self):
+        """(metric of the newest frame, that frame); (None, frame) if it lacks the field."""
+        frame = self._stream.latest()
+        if frame is None:
+            return None, None
+        if frame.count != self._value_count:
+            self._value = self._metric_of(frame)
+            self._value_count = frame.count
+        return self._value, frame
 
     @property
     def frames(self):
-        with self._lock:
-            return self._frames
+        """Tactile messages received on the topic so far."""
+        return self._stream.count
+
+    def close(self):
+        """Release the shared tactile subscription (optional; the process exiting does it too)."""
+        if self._stream is not None:
+            self._stream.release()
+            self._stream = None
 
     def capture_baseline(self, samples, timeout_s=2.0):
-        """Average the resting force and subtract it from every later reading.
+        """Average the resting force over `samples` distinct frames and subtract it from every
+        later reading.
 
         Call this with nothing in the follower gripper. Returns the baseline it settled on.
         """
         if samples <= 0:
             self.baseline = 0.0
             return 0.0
-        target = self.frames + samples
+        collected, seen = [], None
         deadline = time.time() + timeout_s
-        while self.frames < target and time.time() < deadline:
-            time.sleep(0.01)
-        with self._lock:
-            collected = self._samples[-samples:]
+        while len(collected) < samples and time.time() < deadline:
+            frame = self._stream.latest()
+            if frame is not None and frame.count != seen:
+                seen = frame.count
+                value = self._metric_of(frame)
+                if value is not None:
+                    collected.append(value)
+            time.sleep(0.002)
         if not collected:
             print("Warning: no tactile frames to measure the resting force; baseline stays 0.")
             self.baseline = 0.0
@@ -480,10 +497,22 @@ class GripperForceFeedback:
         operator has squeezed (0 in "force" mode or with no contact). The command is 0 whenever
         the feedback is paused, the tactile data is stale, or nothing is being touched.
         """
-        with self._lock:
-            force, stamp, frames = self._force, self._stamp, self._frames
-        age = time.time() - stamp if frames else float("inf")
-        if self._active_since is None or frames == 0 or age > self.timeout_s:
+        value, frame = self._newest()
+        now = time.time()
+        if value is None:
+            self._release_contact()
+            return 0, self._force, float("inf"), 0.0
+        # Time-based EMA on the newest frame's value (held between frames): exactly what the old
+        # per-message filter did at a steady 60 messages/s, at any message or tick rate.
+        if self._filter_time is None:
+            self._force = value
+        else:
+            keep = (1.0 - self.filter_alpha) ** (max(0.0, now - self._filter_time) * FORCE_FILTER_RATE_HZ)
+            self._force = value + (self._force - value) * keep
+        self._filter_time = now
+        force = self._force
+        age = frame.age(now)
+        if self._active_since is None or age > self.timeout_s:
             self._release_contact()
             return 0, force, age, 0.0
 

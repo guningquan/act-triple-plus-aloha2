@@ -136,6 +136,7 @@ from policy_client import PolicyClient
 from real_env import make_real_env
 from robot_utils import move_arms, move_grippers
 from sleep_plus import shut_down_puppet_robots
+from tactile_stream import DEFAULT_MAX_TACTILE_AGE_S, TactileStream
 from record_episodes_aloha2_vtla import (
     DEFAULT_TACTILE_MAP,
     FPS,
@@ -175,7 +176,11 @@ STALE_STREAM_S = 0.5  # refuse to act on a camera/tactile frame older than this
 # --------------------------------------------------------------------------------------------
 
 class RGBStreams:
-    def __init__(self, sources, tactile_map):
+    """Cameras by receipt age (max_age); tactile through the shared tactile_stream.TactileStream,
+    by the data's own age (now - the publisher's local_read_end, max_tactile_age), with rectify in
+    true RGB prepared in the stream's callback thread (decoded first if the publisher sends JPEG)."""
+
+    def __init__(self, sources, tactile_map, max_tactile_age=DEFAULT_MAX_TACTILE_AGE_S):
         import rospy
         from cv_bridge import CvBridge
         from sensor_msgs.msg import Image
@@ -184,6 +189,7 @@ class RGBStreams:
         self._bridge = CvBridge()
         self._latest = {}
         self._subs = []
+        self.max_tactile_age = float(max_tactile_age)
         self.camera_names = sorted({source for key, source in sources.items() if source.startswith("cam_")})
         self.tactile_names = sorted(set(tactile_map.values()))
         if set(self.tactile_names) != set(TACTILE_SENSORS):
@@ -192,13 +198,10 @@ class RGBStreams:
             topic = "/usb_{}/image_raw".format(camera)
             self._subs.append(rospy.Subscriber(topic, Image, self._camera_cb, callback_args=camera,
                                                queue_size=1, buff_size=2 ** 24, tcp_nodelay=True))
-        import pickle
-        self._pickle = pickle
-        from std_msgs.msg import UInt8MultiArray
-        for sensor in self.tactile_names:
-            topic = "/tactile/{}/raw".format(sensor)
-            self._subs.append(rospy.Subscriber(topic, UInt8MultiArray, self._tactile_cb, callback_args=sensor,
-                                               queue_size=1, buff_size=2 ** 24, tcp_nodelay=True))
+        # Deliberately "rgb": the raw publisher's rectify bytes are already the true RGB the model
+        # trained on (see module docstring); only the recording path flips to BGR.
+        self._tactile = {sensor: TactileStream.acquire(sensor, prefetch=(("rectify", "rgb"),))
+                         for sensor in self.tactile_names}
 
     def _camera_cb(self, message, name):
         try:
@@ -210,28 +213,30 @@ class RGBStreams:
         except Exception as exc:
             self._rospy.logwarn_throttle(5, "camera {}: {}".format(name, exc))
 
-    def _tactile_cb(self, message, name):
-        try:
-            frames = self._pickle.loads(bytes(message.data))["frames"]
-            image = np.asarray(frames["rectify"])
-            if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-                raise ValueError("rectify must be a uint8 HxWx3 image")
-            # Deliberately no RGB2BGR here - see module docstring. The SDK's raw bytes are
-            # already the true RGB the model trained on; only the recording path needs to flip.
-            self._latest[name] = (np.array(image, copy=True), time.monotonic())
-        except Exception as exc:
-            self._rospy.logwarn_throttle(5, "tactile {}: {}".format(name, exc))
-
-    def snapshot(self, max_age):
-        now = time.monotonic()
-        names = self.camera_names + self.tactile_names
-        missing = [n for n in names if n not in self._latest]
+    def snapshot(self, max_age, max_tactile_age=None):
+        tactile_limit = self.max_tactile_age if max_tactile_age is None else max_tactile_age
+        now, now_wall = time.monotonic(), time.time()
+        frames = {n: self._tactile[n].latest() for n in self.tactile_names}
+        missing = [n for n in self.camera_names if n not in self._latest] + [n for n, f in frames.items() if f is None]
         if missing:
             raise RuntimeError("no data yet from: {}".format(missing))
-        stale = [n for n in names if now - self._latest[n][1] > max_age]
+        stale = [n for n in self.camera_names if now - self._latest[n][1] > max_age]
+        stale += [n for n, f in frames.items() if f.age(now_wall) > tactile_limit]
         if stale:
-            raise RuntimeError("stale (> {}s old): {}".format(max_age, stale))
-        return {n: self._latest[n][0] for n in names}
+            raise RuntimeError("stale (camera > {}s, tactile > {}s old): {}".format(max_age, tactile_limit, stale))
+        out = {n: self._latest[n][0] for n in self.camera_names}
+        for name, frame in frames.items():
+            image = frame.field("rectify", "rgb")
+            if image is None or image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+                raise RuntimeError("tactile {}: rectify must be a uint8 HxWx3 image".format(name))
+            out[name] = np.array(image, copy=True)
+        return out
+
+    def wait_fresh_tactile(self, after, timeout_s=1.0):
+        """Wait until every tactile sensor has a frame the SDK delivered after host time `after`."""
+        for name in self.tactile_names:
+            if self._tactile[name].wait_newer_than(after, timeout_s) is None:
+                raise RuntimeError("no fresh tactile frame from {} within {:.1f} s".format(name, timeout_s))
 
     def wait_ready(self, timeout_s, max_age):
         deadline = time.monotonic() + timeout_s
@@ -248,6 +253,9 @@ class RGBStreams:
         for sub in self._subs:
             sub.unregister()
         self._subs = []
+        for stream in self._tactile.values():
+            stream.release()
+        self._tactile = {}
 
 
 # --------------------------------------------------------------------------------------------
@@ -370,6 +378,9 @@ def build_arg_parser():
                              "visible per-tick jerk at the cost of tracking lag.")
     parser.add_argument("--stream_timeout", type=float, default=5.0)
     parser.add_argument("--max_stream_age", type=float, default=STALE_STREAM_S)
+    parser.add_argument("--max_tactile_age", type=float, default=DEFAULT_MAX_TACTILE_AGE_S,
+                        help="Refuse tactile frames older than this (s), by the data's own age "
+                             "(the publisher's local_read_end), not by receipt")
     parser.add_argument("--debug", action="store_true",
                         help="Inspect mode: home the arms, then on each ENTER capture one "
                              "observation, print its shapes, show its 7 images (q = next image, "
@@ -387,7 +398,10 @@ def capture_tactile_baseline(streams, max_age):
     pairs every later live frame against whatever this returns, so a stale or mid-contact
     baseline here silently poisons the tactile diff for the whole episode. Keyed by tactile
     *source* name (e.g. "left_gripper_outer"), matching RGBStreams.tactile_names / snapshot().
+    Every tactile view is a frame the SDK delivered after this call started, i.e. after homing.
     """
+    if hasattr(streams, "wait_fresh_tactile"):
+        streams.wait_fresh_tactile(time.time())
     frames = streams.snapshot(max_age)
     return {source: frames[source] for source in streams.tactile_names}
 
@@ -754,7 +768,7 @@ def main():
 
     env = make_real_env(init_node=True, setup_robots=True)
     models = (env.puppet_bot_left.arm.robot_des, env.puppet_bot_right.arm.robot_des)
-    streams = RGBStreams(sources, tactile_map)
+    streams = RGBStreams(sources, tactile_map, max_tactile_age=args.max_tactile_age)
 
     if args.debug:
         # debug_loop() uses input(), a line-based blocking read - KeyboardControl's cbreak mode

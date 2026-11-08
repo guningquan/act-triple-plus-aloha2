@@ -37,16 +37,16 @@ import json
 from itertools import chain
 import os
 from pathlib import Path
-import pickle
 import shutil
 import subprocess
 import tempfile
 import threading
 import time
 
-import cv2
 import numpy as np
 from tqdm import tqdm
+
+from tactile_stream import DEFAULT_MAX_TACTILE_AGE_S, TactileStream, calibrate_sensors, current_runtime_config
 
 FPS = 30.0
 JOINT_COLS = tuple("{}_{}".format(side, joint) for side in ("left", "right")
@@ -188,12 +188,13 @@ def write_csv(path, columns, rows):
 
 
 def export_episode(destination, samples, models, sources, task, *, overwrite=False, calibration=None,
-                   action_space="eef", extra_csvs=None, extra_metadata=None):
+                   action_space="eef", extra_csvs=None, extra_metadata=None, extra_files=None):
     """Publish a complete episode directory only after CSV/video validation succeeds.
 
     extra_csvs: {key: (columns, values)} with one row of `values` per source sample, resampled
     with the same indices as every other CSV and written to <key>/data.csv (hil_rollout.py's
-    per-tick labels). extra_metadata is merged into metadata.json.
+    per-tick labels). extra_metadata is merged into metadata.json. extra_files: {relative path:
+    bytes} written as they are (the tactile runtime configs, see tactile_config_extras()).
     """
     if action_space not in ("eef", "joint_position"):
         raise ValueError("Unsupported ALOHA action space: {}".format(action_space))
@@ -264,8 +265,12 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
                 target.mkdir(parents=True)
                 np.save(str(target / "data.npy"), force, allow_pickle=False)
         stream_names = list(sources.values()) + ["joint_left", "joint_right"]
+        tactile_names = [name for name in stream_names if name in TACTILE_SENSORS]
+        # Tactile data age (sample time - the publisher's local_read_end) is appended after the
+        # per-stream columns, so readers that look columns up by name are unaffected.
         timing_cols = ("timestamp", "source_index", "sample_elapsed_s", "resample_age_s") + tuple(
-            name + suffix for name in stream_names for suffix in ("_sequence", "_receipt_age_s", "_ros_stamp_s"))
+            name + suffix for name in stream_names for suffix in ("_sequence", "_receipt_age_s", "_ros_stamp_s")
+        ) + tuple(name + "_data_age_s" for name in tactile_names)
         timing_rows = []
         for stamp, index, sample in zip(grid, indices, selected):
             elapsed = sample["time"] - samples[0]["time"]
@@ -273,6 +278,7 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
             for name in stream_names:
                 entry = sample["streams"][name]
                 row.extend([entry["sequence"], sample["time"] - entry["received"], entry["stamp"]])
+            row.extend(sample["streams"][name].get("data_age", float("nan")) for name in tactile_names)
             timing_rows.append(row)
         write_csv(root / "timestamps.csv", timing_cols, timing_rows)
         quality = {}
@@ -282,6 +288,13 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
                 "reused_adjacent_frames": int(np.count_nonzero(np.diff(sequence) == 0)),
                 "max_receipt_age_s": max(sample["time"] - sample["streams"][name]["received"] for sample in selected),
             }
+            if name in tactile_names:
+                ages = [sample["streams"][name].get("data_age", float("nan")) for sample in selected]
+                quality[name]["max_data_age_s"] = float(np.nanmax(ages)) if np.isfinite(ages).any() else None
+        for relative, data in (extra_files or {}).items():
+            target = root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
         metadata = {
             "episode_id": destination.name, "total_frames": count, "fps": FPS,
             "robot": "aloha", "task": task, "robot_model": "vx300s", "video_sources": sources,
@@ -297,7 +310,10 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
             "resampling": "30Hz zero-order hold using one common source index for all fields",
             "source_samples": len(samples), "source_duration_s": samples[-1]["time"] - samples[0]["time"],
             "max_resample_age_s": max(row[3] for row in timing_rows),
-            "timing_note": "receipt ages use host monotonic time; ROS header stamps are separate clocks; tactile stamp 0 means unavailable",
+            "timing_note": ("receipt ages use host monotonic time; ROS header stamps are separate clocks; tactile "
+                            "*_ros_stamp_s is the publisher's local_read_end (host time.time() when the XENSE SDK "
+                            "delivered the frame; 0 in episodes recorded before 2026-11) and *_data_age_s the "
+                            "frame's age when sampled"),
             "stream_quality": quality,
             "converter_action_note": (
                 "Current convert_canonical_data.py --robot aloha defaults to action=state and ignores actions.eef_pose CSV"
@@ -334,16 +350,20 @@ def export_episode(destination, samples, models, sources, task, *, overwrite=Fal
 class LiveStreams:
     """Immutable latest values with callback counters and host receipt timestamps.
 
-    Camera callbacks explicitly convert to BGR. Tactile rectify is BGR from XENSE.
-    Missing or stale streams stop recording; they are never replaced by black frames.
-    Receipt counters measure message reuse, not necessarily fresh SDK inference.
+    Camera callbacks explicitly convert to BGR. Tactile comes from each sensor's shared
+    tactile_stream.TactileStream, whose callback thread already turns rectify into BGR (prefetch),
+    whatever image codec the publisher uses, so snapshot() only copies it. Missing or stale streams
+    stop recording; they are never replaced by black frames. Cameras and joints are stale by receipt
+    age (max_age); tactile by the data's own age, now - the publisher's local_read_end
+    (max_tactile_age), which also catches a publisher re-sending an old frame. Receipt counters
+    measure message reuse; the tactile publisher sends each SDK frame once, so a reused tactile
+    counter means no new SDK frame.
     """
 
-    def __init__(self, sources, arm_names, calibration, save_force):
+    def __init__(self, sources, arm_names, calibration, save_force, max_tactile_age=DEFAULT_MAX_TACTILE_AGE_S):
         import rospy
         from cv_bridge import CvBridge
         from sensor_msgs.msg import Image, JointState
-        from std_msgs.msg import UInt8MultiArray
         self.rospy = rospy
         self.bridge = CvBridge()
         self.lock = threading.Lock()
@@ -351,13 +371,13 @@ class LiveStreams:
         self.subs = []
         self.names = list(sources.values()) + ["joint_left", "joint_right"]
         self.save_force = save_force
+        self.max_tactile_age = float(max_tactile_age)
+        self.tactile_names = list(TACTILE_SENSORS)
+        self.tactile = {sensor: TactileStream.acquire(sensor, prefetch=(("rectify", "bgr"),))
+                        for sensor in TACTILE_SENSORS}
         for camera in dict.fromkeys(source for source in sources.values() if source.startswith("cam_")):
             topic = "/usb_{}/image_raw".format(camera)
             self.subs.append(rospy.Subscriber(topic, Image, self.camera_callback, callback_args=camera,
-                                              queue_size=1, buff_size=2 ** 24, tcp_nodelay=True))
-        for sensor in TACTILE_SENSORS:
-            self.subs.append(rospy.Subscriber("/tactile/{}/raw".format(sensor), UInt8MultiArray,
-                                              self.tactile_callback, callback_args=sensor,
                                               queue_size=1, buff_size=2 ** 24, tcp_nodelay=True))
         for side, names, endpoints in zip(("left", "right"), arm_names, calibration):
             self.subs.append(rospy.Subscriber("/puppet_{}/joint_states".format(side), JointState,
@@ -379,28 +399,24 @@ class LiveStreams:
         except Exception as exc:
             self.rospy.logwarn_throttle(5, "VTLA camera {}: {}".format(name, exc))
 
-    def tactile_callback(self, message, name):
-        received = time.monotonic()
-        try:
-            frames = pickle.loads(bytes(message.data))["frames"]
-            image = np.asarray(frames["rectify"])
-            if image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
-                raise ValueError("rectify must be a uint8 image")
-            # The XENSE SDK's own type stub claims "rectify" is BGR, but the actual bytes coming
-            # off the publisher are RGB (confirmed against XenseStudio's reference rendering) -
-            # convert here so this matches camera_callback's true BGR and write_video()'s
-            # "bgr24" input assumption. Without this the tactile videos carry a hue-rotated,
-            # R/B-swapped image while the camera videos are correct.
-            image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-            value = {"image": np.array(image, copy=True, order="C")}
-            if self.save_force:
-                force = np.array(frames["force"], dtype=np.float32, copy=True)
-                if force.shape != (35, 20, 3) or not np.isfinite(force).all():
-                    raise ValueError("force must be finite (35, 20, 3)")
-                value["force"] = force
-            self.put(name, value, received)
-        except Exception as exc:
-            self.rospy.logwarn_throttle(5, "VTLA tactile {}: {}".format(name, exc))
+    def tactile_value(self, frame, data_age):
+        """One tactile frame as a snapshot entry: BGR rectify (+ force), receipt/stamp/sequence/data_age."""
+        # The XENSE SDK's own type stub claims "rectify" is BGR, but the raw bytes off the publisher
+        # are RGB (confirmed against XenseStudio's reference rendering); field("rectify", "bgr")
+        # converts (or decodes a jpeg publisher's frame) so this matches camera_callback's true BGR
+        # and write_video()'s "bgr24" input assumption.
+        image = frame.field("rectify", "bgr")
+        if image is None or image.ndim != 3 or image.shape[2] != 3 or image.dtype != np.uint8:
+            raise ValueError("rectify must be a uint8 image")
+        value = {"image": np.array(image, copy=True, order="C"), "received": frame.recv_mono,
+                 "stamp": frame.read_end, "sequence": frame.count, "data_age": data_age}
+        if self.save_force:
+            force = frame.field("force")
+            force = None if force is None else np.array(force, dtype=np.float32, copy=True)
+            if force is None or force.shape != (35, 20, 3) or not np.isfinite(force).all():
+                raise ValueError("force must be finite (35, 20, 3)")
+            value["force"] = force
+        return value
 
     def joint_callback(self, message, config):
         received = time.monotonic()
@@ -411,15 +427,34 @@ class LiveStreams:
         except Exception as exc:
             self.rospy.logwarn_throttle(5, "VTLA joint {}: {}".format(side, exc))
 
-    def snapshot(self, max_age):
+    def snapshot(self, max_age, max_tactile_age=None):
+        tactile_limit = self.max_tactile_age if max_tactile_age is None else max_tactile_age
         with self.lock:
-            now = time.monotonic()
-            missing = [name for name in self.names if name not in self.latest]
-            stale = [name for name in self.names if name in self.latest
-                     and now - self.latest[name]["received"] > max_age]
+            now, now_wall = time.monotonic(), time.time()
+            entries, missing, stale = {}, [], []
+            for name in self.names:
+                if name in self.tactile:
+                    frame = self.tactile[name].latest()
+                    if frame is None:
+                        missing.append(name)
+                        continue
+                    data_age = frame.age(now_wall)
+                    if data_age > tactile_limit:
+                        stale.append(name)
+                        continue
+                    try:
+                        entries[name] = self.tactile_value(frame, data_age)
+                    except ValueError as exc:
+                        raise RuntimeError("VTLA tactile {}: {}".format(name, exc))
+                elif name not in self.latest:
+                    missing.append(name)
+                elif now - self.latest[name]["received"] > max_age:
+                    stale.append(name)
+                else:
+                    entries[name] = self.latest[name]
             if missing or stale:
                 raise RuntimeError("VTLA streams unavailable: missing={}, stale={}".format(missing, stale))
-            return now, {name: self.latest[name] for name in self.names}
+            return now, entries
 
     def wait_ready(self, timeout, max_age):
         deadline = time.monotonic() + timeout
@@ -436,6 +471,27 @@ class LiveStreams:
         for subscriber in self.subs:
             subscriber.unregister()
         self.subs.clear()
+        for stream in self.tactile.values():
+            stream.release()
+        self.tactile = {}
+
+
+def tactile_config_extras(config):
+    """(extra_files, extra_metadata) for export_episode from a /tactile/runtime_config blob.
+
+    The runtime configs (what the XENSE SDK's Sensor.createSolver needs) go to
+    tactile_runtime_config/<sensor>.tar.gz; their provenance to metadata.json.
+    """
+    if not config:
+        return {}, {}
+    files = {"tactile_runtime_config/{}.tar.gz".format(sensor): bytes(blob)
+             for sensor, blob in sorted((config.get("runtime_configs") or {}).items())}
+    metadata = {"tactile_runtime_config": {
+        "files": sorted(files), "sdk_version": config.get("sdk_version"), "serials": config.get("serials"),
+        "calibrated": config.get("calibrated"), "calibrated_at": config.get("calibrated_at"),
+        "exported_at": config.get("exported_at"), "publisher_settings": config.get("settings"),
+    }}
+    return files, metadata
 
 
 def capture_one_episode(args, legacy, config, destination, sources):
@@ -458,8 +514,10 @@ def capture_one_episode(args, legacy, config, destination, sources):
     streams = None
     progress = None
     leaders_released = False
+    tactile_config = None
     try:
-        streams = LiveStreams(sources, arm_names, calibration, args.save_force)
+        streams = LiveStreams(sources, arm_names, calibration, args.save_force,
+                              max_tactile_age=args.max_tactile_age)
         streams.wait_ready(args.stream_timeout, args.max_stream_age)
         legacy.opening_ceremony(master_left, master_right, env.puppet_bot_left, env.puppet_bot_right,
                                 destination.name, start_open_ratio=args.start_open_ratio)
@@ -469,8 +527,15 @@ def capture_one_episode(args, legacy, config, destination, sources):
                 haptic = legacy.ArmHaptics(bot, side, feedback, brake, torque_gate=not args.no_torque_gate)
                 haptics.append(haptic)
                 haptic.wait_for_data()
-            for haptic in haptics:
-                haptic.calibrate(args.force_baseline_samples)
+        # Re-zero every tactile sensor (followers at the start pose, grippers open, nothing touching)
+        # before the force baseline; the runtime config that zeroing exports is saved with the episode.
+        if args.no_tactile_calibration:
+            tactile_config = current_runtime_config()
+        else:
+            print("Zeroing the tactile sensors - nothing may touch them...")
+            tactile_config = calibrate_sensors(streams.tactile_names)
+        for haptic in haptics:
+            haptic.calibrate(args.force_baseline_samples)
         print("Ready for {}. RIGHT=start; while recording RIGHT=save, LEFT=redo, ESC=quit.".format(destination))
         if not legacy.wait_for_start(keyboard):
             return "quit"
@@ -495,8 +560,14 @@ def capture_one_episode(args, legacy, config, destination, sources):
                         haptic.rezero(args.force_baseline_samples)
             if decision is not None:
                 break
-            # Snapshot ALL state/images/tactile BEFORE sending this sample's action.
-            stamp, snapshot = streams.snapshot(args.max_stream_age)
+            # Snapshot ALL state/images/tactile BEFORE sending this sample's action. A missing or
+            # stale stream stops the episode, which is then recorded again.
+            try:
+                stamp, snapshot = streams.snapshot(args.max_stream_age)
+            except RuntimeError as exc:
+                progress.write("Stopped: {}. This episode will be recorded again.".format(exc))
+                decision = "redo"
+                break
             state = np.concatenate([snapshot["joint_left"]["state"], snapshot["joint_right"]["state"]])
             action = np.array(legacy.get_action(master_left, master_right), dtype=np.float64, copy=True)
             if action.shape != (14,) or not np.isfinite(action).all():
@@ -538,8 +609,10 @@ def capture_one_episode(args, legacy, config, destination, sources):
     if len(samples) < 2:
         print("Episode too short; record it again.")
         return "redo"
+    extra_files, extra_metadata = tactile_config_extras(tactile_config)
     export_episode(destination, samples, models, sources, args.task or args.task_name,
-                   overwrite=args.overwrite, calibration=calibration, action_space=args.aloha_action_space)
+                   overwrite=args.overwrite, calibration=calibration, action_space=args.aloha_action_space,
+                   extra_metadata=extra_metadata, extra_files=extra_files)
     return "save"
 
 
@@ -562,6 +635,10 @@ def build_parser():
     parser.add_argument("--save_force", action="store_true", help="Also save force NPY; requires SDK extra_outputs:=force")
     parser.add_argument("--stream_timeout", type=float, default=5.0, help="Startup wait for all streams, seconds")
     parser.add_argument("--max_stream_age", type=float, default=0.5, help="Stop if any stream receipt is older than this, seconds")
+    parser.add_argument("--max_tactile_age", type=float, default=DEFAULT_MAX_TACTILE_AGE_S,
+                        help="Stop (and re-record) if a tactile frame is older than this, seconds, by the data's own age")
+    parser.add_argument("--no_tactile_calibration", action="store_true",
+                        help="Do not re-zero the tactile sensors (/tactile/calibrate) before each episode")
     parser.add_argument("--no_force_feedback", action="store_true")
     parser.add_argument("--no_torque_gate", action="store_true")
     for name in ("start_open_ratio", "force_deadband", "force_full_scale", "wall_stiffness_min",

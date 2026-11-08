@@ -171,15 +171,20 @@ class Frame:
     vtla: record_episodes_aloha2_vtla.LiveStreams snapshot ({name: {"image" BGR, ...}} for the
         cameras and tactile sensors, {"state": 7-vector} for joint_left/joint_right), or None when
         the VTLA streams are not running.
+    tactile: RealEnv.get_observation()'s obs['tactile'] (a TactileRecorder snapshot taken with the
+        images), or None when no TactileRecorder is attached.
+    timestamps: RealEnv.get_observation()'s obs['timestamps'], or None.
     """
 
-    def __init__(self, time, qpos, qvel, effort, images, vtla=None):
+    def __init__(self, time, qpos, qvel, effort, images, vtla=None, tactile=None, timestamps=None):
         self.time = time
         self.qpos = qpos
         self.qvel = qvel
         self.effort = effort
         self.images = images
         self.vtla = vtla
+        self.tactile = tactile
+        self.timestamps = timestamps
 
 
 def solve_ik(arm, xyz, rotation, guess):

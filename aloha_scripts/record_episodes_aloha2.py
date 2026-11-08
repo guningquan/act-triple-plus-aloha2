@@ -1,5 +1,4 @@
 import os,sys
-import pickle
 import threading
 import time
 import h5py
@@ -18,10 +17,17 @@ from robot_utils import Recorder, ImageRecorder, get_arm_gripper_positions
 from robot_utils import move_arms, torque_on, torque_off, move_grippers
 from real_env import make_real_env, get_action
 
-import rospy
+import rospy  # noqa: F401 - unused here, but record_episodes_aloha2_vtla.py uses it as legacy.rospy
 from interbotix_xs_modules.arm import InterbotixManipulatorXS
-from std_msgs.msg import UInt8MultiArray
 from sleep_plus import sleep_all_robots,shut_down_all_robots
+from tactile_stream import (DEFAULT_MAX_TACTILE_AGE_S, TactileStale, TactileStream, calibrate_sensors,
+                            current_runtime_config, topic_for)
+from tactile_hdf5 import observation_timestamps, write_tactile, write_tactile_metadata, write_timestamps
+
+# JPEG quality for tactile image fields (rectify / difference) when the publisher sends them raw.
+# Measured 2026-11-08 on recorded XENSE frames: q90 = 28 KB/frame, depth recomputed from it is
+# off by <=0.017 mm at contact peaks; q50 = 10 KB/frame, 0.029 mm. Cameras are stored at q90 too.
+DEFAULT_TACTILE_JPEG_QUALITY = 90
 
 # Leader-gripper haptics, imported rather than copied so both scripts share one implementation
 # and one set of tuned defaults: retune one_side_teleop.py and recording follows automatically.
@@ -148,173 +154,191 @@ class ArmHaptics:
 
 
 class TactileRecorder:
-    """Buffers selected fields from selected XENSE sensors, one sample per recorded timestep.
+    """Aligned tactile snapshots for the recorded observations, packed for HDF5 at the end.
 
-    Each /tactile/<name>/raw message is a pickled {"frames": {...}, "meta": {...}} bundle from
-    4arms_tactile_teleop.launch. Only the fields the task config asks for are kept, because the
-    cost of them differs by three orders of magnitude: the 35x20 fields (force, mesh3d, ...) are
-    a few KB per frame, while rectify/difference/depth are ~1 MB per frame per sensor and
-    dominate both RAM during the episode and the file afterwards. estimate() spells that out
-    before recording starts so the operator sees the bill first.
+    Attach it as env.tactile and RealEnv.get_observation() calls snapshot(), so every observation
+    carries obs['tactile'] taken in the same call as its camera images and joint states - not a
+    control step later, as when tactile was sampled after env.step(). pack() and timing() then
+    turn the stored observations' snapshots into the HDF5 datasets.
 
-    Sampling is pull-based: the callback only keeps the newest bundle, and sample() copies it
-    into the buffers once per recorded timestep, so the tactile stream (60Hz) and the recording
-    loop (~50Hz) do not have to agree on a rate.
+    Each snapshot keeps only the fields the task config asks for, because the cost of them differs
+    by three orders of magnitude: the 35x20 fields (force, mesh3d, ...) are a few KB per frame,
+    while rectify/difference/depth are ~1 MB per frame per sensor and dominate both RAM during the
+    episode and the file afterwards. estimate() spells that out before recording starts.
+
+    Frames come from the shared tactile_stream.TactileStream of each sensor (one subscription per
+    process, also used by the force feedback). snapshot() raises tactile_stream.TactileStale when
+    a sensor has no frame yet or its newest frame is older than max_age_s by the data's own age
+    (now - the publisher's local_read_end); the recording loop then stops and re-records the
+    episode rather than store a frozen frame. Image fields are kept as BGR uint8 and JPEG'd at
+    jpeg_quality on pack(), like the camera images; when the publisher already sends them as JPEG
+    (image_codec:=jpeg) those bytes are stored as they are, without a second encode.
     """
 
-    # uint8 BGR frames, JPEG'd on write exactly like the camera images
     IMAGE_FIELDS = ("rectify", "difference")
+    TIMING_KEYS = ("timestamp", "read_start", "read_end", "frame_age")
 
-    def __init__(self, sensor_names, field_names):
+    def __init__(self, sensor_names, field_names, max_age_s=DEFAULT_MAX_TACTILE_AGE_S,
+                 jpeg_quality=DEFAULT_TACTILE_JPEG_QUALITY):
         self.sensor_names = list(sensor_names)
         self.field_names = list(field_names)
-        self.buffers = {name: {field: [] for field in self.field_names} for name in self.sensor_names}
-        self.missing = {name: 0 for name in self.sensor_names}
-        self._latest = {name: None for name in self.sensor_names}
-        self._lock = threading.Lock()
-        self._subs = []
+        self.max_age_s = float(max_age_s)
+        self.jpeg_quality = int(jpeg_quality)
+        self._streams = {name: TactileStream.acquire(name) for name in self.sensor_names}
+        self._last_seq = {}
         for name in self.sensor_names:
-            topic = f"/tactile/{name}/raw"
-            self._subs.append(rospy.Subscriber(
-                topic, UInt8MultiArray, self._callback, callback_args=name,
-                queue_size=1, buff_size=2 ** 24, tcp_nodelay=True))
-            print(f"Recording tactile {name} -> {topic}: {', '.join(self.field_names)}")
-
-    def _callback(self, msg, name):
-        try:
-            payload = pickle.loads(bytes(msg.data))
-        except Exception as exc:
-            rospy.logwarn_throttle(5.0, f"tactile recorder: cannot unpickle {name}: {exc}")
-            return
-        frames = payload.get("frames", {})
-        # Copy only what is wanted; the bundle's other entries can be ~1MB each.
-        sample = {}
-        for field in self.field_names:
-            value = frames.get(field)
-            if value is None:
-                continue
-            array = np.array(value, copy=True)
-            if field in self.IMAGE_FIELDS and array.ndim == 3 and array.shape[-1] == 3:
-                # The XENSE SDK's own type stub claims "rectify"/"difference" are BGR, but the
-                # actual bytes off the publisher are RGB (confirmed against XenseStudio's
-                # reference rendering). cv2.imencode('.jpg', ...) below assumes BGR, so convert
-                # here or every saved tactile frame comes out R/B-swapped.
-                array = cv2.cvtColor(array, cv2.COLOR_RGB2BGR)
-            sample[field] = array
-        with self._lock:
-            self._latest[name] = sample
+            print(f"Recording tactile {name} -> {self._streams[name].topic}: {', '.join(self.field_names)}")
 
     def wait_for_data(self, timeout_s=3.0):
         """Return the sensors that produced nothing within the timeout."""
         deadline = time.time() + timeout_s
-        while time.time() < deadline:
-            with self._lock:
-                silent = [name for name, sample in self._latest.items() if sample is None]
-            if not silent:
-                return []
-            time.sleep(0.05)
-        return silent
+        for stream in self._streams.values():
+            stream.wait_for_frame(max(0.0, deadline - time.time()))
+        return [name for name, stream in self._streams.items() if stream.latest() is None]
 
     def check_fields(self):
         """Report fields that were asked for but never showed up in a bundle."""
         problems = {}
-        with self._lock:
-            for name, sample in self._latest.items():
-                if sample is None:
-                    continue
-                absent = [field for field in self.field_names if field not in sample]
-                if absent:
-                    problems[name] = absent
+        for name, stream in self._streams.items():
+            frame = stream.latest()
+            if frame is None:
+                continue
+            absent = [field for field in self.field_names if field not in frame.frames]
+            if absent:
+                problems[name] = absent
         return problems
 
-    def sample(self):
-        """Take one sample per sensor. Call once per recorded timestep."""
-        with self._lock:
-            for name in self.sensor_names:
-                latest = self._latest[name]
-                if latest is None:
-                    self.missing[name] += 1
-                for field in self.field_names:
-                    self.buffers[name][field].append(None if latest is None else latest.get(field))
+    def reset(self):
+        """Forget the previous snapshot, so the next one counts as a new frame. Call per episode."""
+        self._last_seq = {}
+
+    def snapshot(self):
+        """{sensor: sample} of every sensor's newest frame; raises TactileStale if any is too old.
+
+        sample = {"fields": {field: array},
+                  "encoded": {field: the publisher's JPEG quality (None if unknown), for JPEG bytes
+                              stored as they are},
+                  "timestamp", "read_start", "read_end", "frame_age", "seq", "new_frame"}
+        """
+        now = time.time()
+        sample = {}
+        for name in self.sensor_names:
+            frame = self._streams[name].latest()
+            if frame is None:
+                raise TactileStale(f"no tactile frame from {name} yet")
+            age = frame.age(now)
+            if age > self.max_age_s:
+                raise TactileStale(f"tactile {name} frame is {age * 1000:.0f} ms old "
+                                   f"(limit {self.max_age_s * 1000:.0f} ms)")
+            fields, encoded = {}, {}
+            for field in self.field_names:
+                jpeg = frame.jpeg_bytes(field) if field in self.IMAGE_FIELDS else None
+                if jpeg is not None:
+                    fields[field] = np.array(jpeg, copy=True)
+                    encoded[field] = (frame.encoding(field) or {}).get("quality")
+                    continue
+                order = "bgr" if field in self.IMAGE_FIELDS else "rgb"
+                value = frame.field(field, order)
+                if value is not None:
+                    fields[field] = np.array(value, copy=True)
+            seq = frame.seq
+            sample[name] = {
+                "fields": fields, "encoded": encoded,
+                "timestamp": frame.timestamp, "read_start": frame.read_start, "read_end": frame.read_end,
+                "frame_age": age, "seq": seq, "new_frame": self._last_seq.get(name) != seq,
+            }
+            self._last_seq[name] = seq
+        return sample
 
     def estimate(self, n_steps):
-        """Human-readable RAM/disk estimate for an episode of n_steps, from the live shapes."""
-        with self._lock:
-            samples = {name: sample for name, sample in self._latest.items() if sample}
-        if not samples:
-            return "tactile size unknown (no data yet)"
-        total = 0
-        parts = []
-        for name, sample in samples.items():
-            for field, value in sample.items():
-                total += value.nbytes * n_steps
-            parts.append(name)
-        return (f"tactile buffer for {n_steps} steps x {len(parts)} sensors: "
+        """Human-readable RAM estimate for an episode of n_steps, from the live frames."""
+        try:
+            sample = self.snapshot()
+        except TactileStale:
+            return "tactile size unknown (no fresh data yet)"
+        total = sum(value.nbytes for s in sample.values() for value in s["fields"].values()) * n_steps
+        return (f"tactile buffer for {n_steps} steps x {len(sample)} sensors: "
                 f"~{total / 1e9:.2f} GB before compression")
 
-    def pack(self, episode_len, jpeg_quality=50, compress=True):
-        """Turn the buffers into HDF5-ready arrays.
+    def pack(self, samples, compress=True, jpeg_quality=None):
+        """Turn one snapshot per stored step into HDF5-ready arrays.
 
         Returns (packed, lengths):
           packed  = {sensor: {field: {"data": ndarray, "compressed": bool, "shape": tuple}}}
           lengths = {"entries": ["<sensor>/<field>", ...], "lens": (n_entries, T) int64}
 
-        With compress=True the image fields are JPEG-encoded and zero-padded to ONE width shared
-        by every tactile image dataset, with the true byte counts gathered into a single table -
-        the same layout the camera images use, so both can be read the same way. JPEG output is
-        variable length while HDF5 rows are not, hence the padding and the table. With
-        compress=False they are stored as raw (T, H, W, 3) uint8 instead, which is ~140x larger
-        and needs a second full-size array while packing. Everything else becomes float32.
-        Timesteps where a sensor had not published yet are zero-filled.
+        With compress=True the image fields are JPEG (stored-as-is bytes from a jpeg publisher, or
+        encoded here at jpeg_quality) zero-padded to ONE width shared by every tactile image
+        dataset, with the true byte counts gathered into a single table - the same layout the
+        camera images use, so both can be read the same way. With compress=False they are stored
+        as raw (T, H, W, 3) uint8 BGR instead. Everything else becomes float32.
         """
+        quality = self.jpeg_quality if jpeg_quality is None else int(jpeg_quality)
         packed = {}
-        pending = []  # (sensor, field, encoded frames, lens, original shape)
+        pending = []  # (sensor, field, encoded frames, lens, frame shape)
         for name in self.sensor_names:
             packed[name] = {}
             for field in self.field_names:
-                frames = self.buffers[name][field][:episode_len]
-                template = next((f for f in frames if f is not None), None)
-                if template is None:
-                    print(f"Warning: tactile {name}/{field} never produced data; skipping it.")
+                # (value, stored as published JPEG?, that JPEG's quality) per step
+                entries = [(s[name]["fields"].get(field), field in s[name]["encoded"],
+                            s[name]["encoded"].get(field)) for s in samples]
+                if not entries or any(value is None for value, _, _ in entries):
+                    print(f"Warning: tactile {name}/{field} is missing from some steps; skipping it.")
                     continue
-                filled = [f if f is not None else np.zeros_like(template) for f in frames]
-                if field in self.IMAGE_FIELDS and template.dtype == np.uint8 and compress:
-                    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality]
-                    encoded = [cv2.imencode('.jpg', f, encode_param)[1] for f in filled]
-                    lens = np.array([len(e) for e in encoded], dtype=np.int64)
-                    pending.append((name, field, encoded, lens, template.shape))
-                elif field in self.IMAGE_FIELDS and template.dtype == np.uint8:
-                    packed[name][field] = {
-                        "data": np.asarray(filled, dtype=np.uint8),
-                        "compressed": False,
-                        "shape": template.shape,
-                    }
+                if field in self.IMAGE_FIELDS:
+                    shape = next((v.shape for v, pre, _ in entries if not pre), None)
+                    if shape is None:
+                        shape = cv2.imdecode(entries[0][0], cv2.IMREAD_COLOR).shape
+                    if compress:
+                        params = [int(cv2.IMWRITE_JPEG_QUALITY), quality]
+                        encoded = [v.reshape(-1) if pre else cv2.imencode('.jpg', v, params)[1].reshape(-1)
+                                   for v, pre, _ in entries]
+                        lens = np.array([len(e) for e in encoded], dtype=np.int64)
+                        # The quality the stored JPEGs were made at, if it is one known value.
+                        qualities = {q if pre else quality for _, pre, q in entries}
+                        stored_quality = qualities.pop() if len(qualities) == 1 else None
+                        pending.append((name, field, encoded, lens, shape, stored_quality))
+                    else:
+                        frames = [cv2.imdecode(v, cv2.IMREAD_COLOR) if pre else v for v, pre, _ in entries]
+                        packed[name][field] = {"data": np.asarray(frames, dtype=np.uint8),
+                                               "compressed": False, "shape": shape}
                 else:
-                    packed[name][field] = {
-                        "data": np.asarray(filled, dtype=np.float32),
-                        "compressed": False,
-                        "shape": template.shape,
-                    }
+                    packed[name][field] = {"data": np.asarray([v for v, _, _ in entries], dtype=np.float32),
+                                           "compressed": False, "shape": entries[0][0].shape}
 
         padded_size = int(max((entry[3].max() for entry in pending), default=0))
-        entries, all_lens = [], []
-        for name, field, encoded, lens, shape in pending:
+        entry_names, all_lens = [], []
+        for name, field, encoded, lens, shape, stored_quality in pending:
             padded = np.zeros((len(encoded), padded_size), dtype='uint8')
             for i, e in enumerate(encoded):
-                padded[i, :len(e)] = e.reshape(-1)
-            packed[name][field] = {"data": padded, "compressed": True, "shape": shape}
-            entries.append(f"{name}/{field}")
+                padded[i, :len(e)] = e
+            packed[name][field] = {"data": padded, "compressed": True, "shape": shape,
+                                   "jpeg_quality": stored_quality}
+            entry_names.append(f"{name}/{field}")
             all_lens.append(lens)
         lengths = {
-            "entries": entries,
-            "lens": np.stack(all_lens) if all_lens else np.zeros((0, episode_len), dtype=np.int64),
+            "entries": entry_names,
+            "lens": np.stack(all_lens) if all_lens else np.zeros((0, len(samples)), dtype=np.int64),
         }
         return packed, lengths
 
+    def timing(self, samples):
+        """{sensor: {timestamp, read_start, read_end, frame_age, seq, new_frame}} arrays, one per step."""
+        out = {}
+        for name in self.sensor_names:
+            out[name] = {key: np.array([s[name][key] for s in samples], dtype=np.float64) for key in self.TIMING_KEYS}
+            out[name]["seq"] = np.array([s[name]["seq"] for s in samples], dtype=np.int64)
+            out[name]["new_frame"] = np.array([s[name]["new_frame"] for s in samples], dtype=bool)
+        return out
+
+    def settings(self):
+        return {"sensors": self.sensor_names, "fields": self.field_names, "max_age_s": self.max_age_s,
+                "jpeg_quality": self.jpeg_quality}
+
     def close(self):
-        for sub in self._subs:
-            sub.unregister()
-        self._subs = []
+        for stream in self._streams.values():
+            stream.release()
+        self._streams = {}
 
 
 def wait_for_decision(keyboard, prompt):
@@ -495,19 +519,36 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
                 print(f"Force feedback ({robot_side}): {arm.feedback.describe()}")
             for arm in haptics:
                 arm.wait_for_data()
-            for arm in haptics:
-                arm.calibrate(baseline_samples)
 
         if tactile_sensors and tactile_outputs:
-            tactile = TactileRecorder(tactile_sensors, tactile_outputs)
+            tactile = TactileRecorder(tactile_sensors, tactile_outputs,
+                                      max_age_s=haptics_args.get("max_tactile_age", DEFAULT_MAX_TACTILE_AGE_S),
+                                      jpeg_quality=haptics_args.get("tactile_jpeg_quality",
+                                                                    DEFAULT_TACTILE_JPEG_QUALITY))
             silent = tactile.wait_for_data()
             if silent:
-                print(f"Warning: no tactile data from {', '.join(silent)}. Those timesteps will "
-                      f"be zero-filled - check the launch and 'rostopic hz'.")
+                print(f"Warning: no tactile data from {', '.join(silent)} - check the launch and "
+                      f"'rostopic hz'. Recording stops if they are still silent when it starts.")
             for name, absent in tactile.check_fields().items():
                 print(f"Warning: {name} publishes no {', '.join(absent)}. Relaunch with "
                       f'extra_outputs containing them, or drop them from tactile_outputs.')
             print(tactile.estimate(max_timesteps))
+
+        # Re-zero the tactile sensors through the publisher before the force baseline is taken:
+        # the puppets are at the start pose with open grippers, so nothing touches the gels. The
+        # runtime config that zeroing exports is stored with the episode.
+        tactile_sensors_in_use = sorted({topic_for(name) for name in (tactile.sensor_names if tactile else [])}
+                                        | {topic_for(arm.feedback.topic) for arm in haptics})
+        tactile_config = None
+        if tactile_sensors_in_use:
+            if haptics_args.get("no_tactile_calibration", False):
+                tactile_config = current_runtime_config()
+            else:
+                print("Zeroing the tactile sensors - nothing may touch them...")
+                tactile_config = calibrate_sensors(tactile_sensors_in_use)
+                print("Tactile sensors zeroed.")
+        for arm in haptics:
+            arm.calibrate(baseline_samples)
 
         print(f"Ready to record {dataset_name}.")
         if not wait_for_start(keyboard):
@@ -523,50 +564,62 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
         print("Recording. RIGHT = stop and save, LEFT = stop and re-record, "
               "b = re-zero baselines, ESC = abort the run.")
 
-        # Data collection
-        ts = env.reset(fake=True)
-        timesteps = [ts]
+        # Data collection. With a TactileRecorder attached, every observation (the reset one
+        # included) carries obs['tactile'], taken in the same get_observation() call as its
+        # images and joint states; a stale tactile frame raises TactileStale out of env.step()
+        # and the episode is re-recorded instead of storing frozen data.
+        if tactile is not None:
+            tactile.reset()
+            env.tactile = tactile
+        timesteps = []
         actions = []
         actual_dt_history = []
-        time0 = time.time()
-        last_status = 0.0
-        progress = tqdm(total=max_timesteps)
         t = 0
-        while t < max_timesteps:
-            for event in keyboard.poll():
-                if event == "right":
-                    decision = "save"
-                elif event == "left":
-                    decision = "redo"
-                elif event == "esc":
-                    decision = "quit"
-                elif event == "rezero":
-                    for arm in haptics:
-                        arm.rezero(baseline_samples)
-                if decision is not None:
-                    break
-            if decision is not None:
-                progress.write(f"Stopped early at {t}/{max_timesteps} timesteps -> {decision}.")
-                break
-
-            t0 = time.time() #
-            action = get_action(master_bot_left, master_bot_right)
-            t1 = time.time() #
-            ts = env.step(action)
-            t2 = time.time() #
+        progress = tqdm(total=max_timesteps)
+        time0 = time.time()
+        try:
+            ts = env.reset(fake=True)
             timesteps.append(ts)
-            actions.append(action)
-            actual_dt_history.append([t0, t1, t2])
-            if tactile is not None:
-                tactile.sample()
-            for arm in haptics:
-                arm.update()
-            if haptics and t2 - last_status >= 1.0:
-                last_status = t2
-                progress.write("  ".join(arm.status() for arm in haptics))
-            time.sleep(max(0, DT - (time.time() - t0)))
-            t += 1
-            progress.update(1)
+            time0 = time.time()
+            last_status = 0.0
+            while t < max_timesteps:
+                for event in keyboard.poll():
+                    if event == "right":
+                        decision = "save"
+                    elif event == "left":
+                        decision = "redo"
+                    elif event == "esc":
+                        decision = "quit"
+                    elif event == "rezero":
+                        for arm in haptics:
+                            arm.rezero(baseline_samples)
+                    if decision is not None:
+                        break
+                if decision is not None:
+                    progress.write(f"Stopped early at {t}/{max_timesteps} timesteps -> {decision}.")
+                    break
+
+                t0 = time.time() #
+                action = get_action(master_bot_left, master_bot_right)
+                t1 = time.time() #
+                ts = env.step(action)
+                t2 = time.time() #
+                timesteps.append(ts)
+                actions.append(action)
+                actual_dt_history.append([t0, t1, t2])
+                for arm in haptics:
+                    arm.update()
+                if haptics and t2 - last_status >= 1.0:
+                    last_status = t2
+                    progress.write("  ".join(arm.status() for arm in haptics))
+                time.sleep(max(0, DT - (time.time() - t0)))
+                t += 1
+                progress.update(1)
+        except TactileStale as exc:
+            decision = "redo"
+            progress.write(f"Stopped at {t}/{max_timesteps} timesteps: {exc}. This episode will be re-recorded.")
+        finally:
+            env.tactile = None
         progress.close()
         elapsed = time.time() - time0
         print(f'Avg fps: {t / elapsed if elapsed else 0:.2f} over {t} timesteps')
@@ -595,7 +648,8 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
             arm.restore()
         keyboard.close()
         if tactile is not None:
-            # Unsubscribe here whatever happens: pack() only reads the buffers, so nothing below
+            # Unsubscribe here whatever happens: pack() only reads the snapshots stored in the
+            # observations, so nothing below
             # needs the stream alive, and every early return would otherwise leak a subscriber.
             tactile.close()
 
@@ -643,9 +697,13 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
         data_dict[f'/observations/images/{cam_name}'] = []
 
     # len(action): max_timesteps, len(time_steps): max_timesteps + 1
+    # Step t stores the observation taken before action t (timesteps[t]) - and that observation's
+    # own tactile snapshot and timestamps - with action t and the loop timing of action t.
+    stored_observations = []
     while actions:
         action = actions.pop(0)
         ts = timesteps.pop(0)
+        stored_observations.append(ts.observation)
         data_dict['/observations/qpos'].append(ts.observation['qpos'])
         data_dict['/observations/qvel'].append(ts.observation['qvel'])
         data_dict['/observations/effort'].append(ts.observation['effort'])
@@ -702,19 +760,30 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
             data_dict[f'/observations/images/{cam_name}'] = padded_compressed_image_list
         print(f'padding: {time.time() - t0:.2f}s')
 
+    # Per-step timestamps (tactile_hdf5's layout): when each observation was assembled, its camera
+    # and joint header stamps, the loop timing of the action stored with it, and each tactile
+    # frame's own timing.
+    dt_history = np.asarray(actual_dt_history, dtype=np.float64).reshape(-1, 3)[:episode_len]
+    timestamps = observation_timestamps(stored_observations)
+    timestamps.update(control_start=dt_history[:, 0], action_read=dt_history[:, 1], step_done=dt_history[:, 2])
+
     tactile_packed, tactile_lengths = {}, {"entries": [], "lens": None}
     if tactile is not None:
         t0 = time.time()
-        tactile_packed, tactile_lengths = tactile.pack(episode_len, compress=COMPRESS)
+        tactile_samples = [obs['tactile'] for obs in stored_observations]
+        tactile_packed, tactile_lengths = tactile.pack(tactile_samples, compress=COMPRESS)
+        timestamps['tactile'] = tactile.timing(tactile_samples)
         packed_bytes = sum(entry["data"].nbytes
                            for fields in tactile_packed.values() for entry in fields.values())
         print(f'tactile pack: {time.time() - t0:.2f}s, {packed_bytes / 1e6:.1f} MB')
+    tactile_recorder_settings = tactile.settings() if tactile is not None else None
 
     # HDF5
     t0 = time.time()
 
     def save_hdf5(dataset_path, camera_names, episode_len, padded_size, COMPRESS, data_dict,
-                  compressed_len, tactile_packed, tactile_lengths):
+                  compressed_len, tactile_packed, tactile_lengths, timestamps, tactile_config,
+                  tactile_recorder_settings):
         """在后台线程中保存 HDF5 数据"""
         with h5py.File(dataset_path + '.hdf5', 'w', rdcc_nbytes=1024 ** 2 * 2) as root:
             root.attrs['sim'] = False
@@ -747,25 +816,16 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
             # /observations/tactile/<sensor>/<field>, laid out like the camera images: JPEG
             # frames zero-padded to one shared width, with the true byte counts in a single
             # /observations/tactile/compress_len table whose row order is in its 'entries' attr.
-            if tactile_packed:
-                tactile_group = obs.create_group('tactile')
-                for sensor_name, fields in tactile_packed.items():
-                    sensor_group = tactile_group.create_group(sensor_name)
-                    for field_name, entry in fields.items():
-                        dataset = sensor_group.create_dataset(
-                            field_name, data=entry["data"],
-                            chunks=(1,) + entry["data"].shape[1:] if entry["data"].ndim > 1 else None)
-                        dataset.attrs['compressed'] = entry["compressed"]
-                        dataset.attrs['frame_shape'] = np.array(entry["shape"], dtype='int64')
-                if tactile_lengths["entries"]:
-                    lengths_dataset = tactile_group.create_dataset(
-                        'compress_len', data=tactile_lengths["lens"])
-                    lengths_dataset.attrs['entries'] = tactile_lengths["entries"]
+            # Then /observations/timestamps and /metadata/tactile (see tactile_hdf5.py).
+            write_tactile(obs, tactile_packed, tactile_lengths)
+            write_timestamps(obs, timestamps)
+            if tactile_packed or tactile_config is not None:
+                write_tactile_metadata(root, tactile_config, tactile_recorder_settings)
 
     # 启动后台线程
     thread = threading.Thread(target=save_hdf5, args=(
     dataset_path, camera_names, episode_len, padded_size, COMPRESS, data_dict, compressed_len,
-    tactile_packed, tactile_lengths))
+    tactile_packed, tactile_lengths, timestamps, tactile_config, tactile_recorder_settings))
     thread.start()
 
     # print("HDF5 data storage has started, and the main thread continues executing other tasks...")
@@ -873,6 +933,16 @@ if __name__ == '__main__':
                         help='PWM per rad/s of closing speed above the limit. 0 disables the brake.')
     parser.add_argument('--force_baseline_samples', type=int, default=DEFAULT_FORCE_BASELINE_SAMPLES,
                         help="Frames averaged to cancel each sensor's resting offset. 0 disables.")
+    # Tactile (4arms_tactile_teleop.launch): data age limit, storage quality, per-episode zeroing.
+    parser.add_argument('--max_tactile_age', type=float, default=DEFAULT_MAX_TACTILE_AGE_S,
+                        help="Stop and re-record the episode if a tactile frame is older than this (s), "
+                             "by the data's own age.")
+    parser.add_argument('--tactile_jpeg_quality', type=int, default=DEFAULT_TACTILE_JPEG_QUALITY,
+                        help="JPEG quality for tactile rectify/difference sent raw by the publisher "
+                             "(frames it already sends as JPEG are stored as they are).")
+    parser.add_argument('--no_tactile_calibration', action='store_true',
+                        help="Do not re-zero the tactile sensors (/tactile/calibrate) at the start of "
+                             "each episode.")
     # main(vars(parser.parse_args()))
     # debug()
 

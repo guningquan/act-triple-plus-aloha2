@@ -35,6 +35,7 @@ from std_msgs.msg import UInt8MultiArray
 
 from constants import DT
 from robot_utils import get_arm_gripper_positions, move_grippers
+from tactile_stream import decode_field
 from one_side_teleop import (
     make_bot, set_puppet_gripper_current_limit, master_gripper_pose, master_to_puppet_gripper,
     get_arm_gripper_effort, get_arm_gripper_velocity,
@@ -324,7 +325,9 @@ def print_current_settings(feedback, brake):
 
 def setup_hardware(side, args):
     """Bring up master_<side>/puppet_<side>'s GRIPPERS only. The arms are never touched."""
-    master_bot = make_bot("wx250s", f"master_{side}", init_node=True)
+    # main() has already called rospy.init_node("check_tactile", ...); a second init_node with
+    # other arguments raises ROSException, so neither bot initialises the node again.
+    master_bot = make_bot("wx250s", f"master_{side}", init_node=False)
     puppet_bot = make_bot("vx300s", f"puppet_{side}", init_node=False)
 
     puppet_bot.dxl.robot_reboot_motors("single", "gripper", True)
@@ -513,8 +516,9 @@ def main():
                                 cv2.imshow(CURVE_WINDOW, strip_charts(history, y_scale=args.curve_scale))
                         panels = []
                         if frames.get("rectify") is not None:
-                            # XENSE's own type stub claims BGR; the actual bytes are RGB.
-                            panels.append(to_panel(cv2.cvtColor(frames["rectify"], cv2.COLOR_RGB2BGR)))
+                            # XENSE's own type stub claims BGR; the raw publisher's bytes are RGB.
+                            # decode_field() also handles a publisher sending JPEG (image_codec:=jpeg).
+                            panels.append(to_panel(decode_field(frames, payload.get("meta"), "rectify", order="bgr")))
                         if frames.get("force") is not None:
                             force_field = np.asarray(frames["force"])
                             panels.append(heatmap(force_field, "force", args.force_scale,

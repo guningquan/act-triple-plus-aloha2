@@ -22,8 +22,12 @@ python3 aloha_scripts/record_episodes_aloha2_vtla.py \
 - 默认保存路径直接使用任务配置 `dataset_dir`，不添加后缀；已有 episode 默认拒绝覆盖。
 - `--overwrite` 显式覆盖同编号目录，导出失败时保留此前完整 episode。
 - 需要 `ffmpeg`（含 `libx264`）、`ffprobe`、`modern_robotics` 和原有采集脚本的 ROS 依赖。
-- 必须有三路相机和四路触觉 `rectify`。缺失或超过 `--max_stream_age 0.5` 秒未收到消息时，
-  报错停止，不保存缺失图像的 episode。启动等待默认 `--stream_timeout 5` 秒。
+- 必须有三路相机和四路触觉 `rectify`。相机/关节缺失或超过 `--max_stream_age 0.5` 秒未收到消息、
+  触觉帧本身超过 `--max_tactile_age 0.2` 秒（按发布器的 `local_read_end` 计算的数据年龄）时，停止这一条
+  并重录，不保存缺失图像的 episode。启动等待默认 `--stream_timeout 5` 秒。
+- 每条 episode 开始时自动给四路触觉清零（`/tactile/calibrate`，此时不要碰传感器），清零后导出的 runtime
+  config 保存在 `episode_N/tactile_runtime_config/<sensor>.tar.gz`，来源写入 `metadata.json` 的
+  `tactile_runtime_config`；`--no_tactile_calibration` 可以关闭清零。
 - 主臂力反馈默认开启，仍需要触觉发布器提供 `force`；`--no_force_feedback` 可以关闭。
 - `--save_force` 额外保存四路 `(T,35,20,3)` float32 NPY，需要触觉发布器启用
   `extra_outputs:="force"`。VTLA 当前转换器不读取这些力场文件。
@@ -73,14 +77,17 @@ aloha2_tactile_test/
 各路的实际尺寸写入 `metadata.json` 的 `video_sizes`，顺序是 `[width, height]`。
 同一路视频在一个 episode 内必须保持尺寸一致；yuv420p要求宽高为正偶数，
 不满足时明确报错，不会自动修改尺寸。原尺寸帧会占用更多采集内存和保存空间。
-相机显式转 BGR，触觉使用 SDK 的 BGR rectify。所有模态在发送对应动作前取最新值；
+相机显式转 BGR；触觉 rectify 由 `tactile_stream.py` 转成 BGR（发布器默认以 raw 发 RGB，翻转通道；用
+`image_codec:=jpeg` 发时先解码 JPEG，视频里就多一代 JPEG q90 压缩）。所有模态在发送对应动作前取最新值；
 导出时按实际 monotonic 采样时间统一零阶保持重采样到30Hz，不通过修改帧率标签改变时长。
 同一输出帧的全部字段使用相同源样本索引，CSV行数与视频帧数完全相同。
 
 这仍是异步传感器的“最新值”采样，不是硬件同步。`timestamps.csv` 保存源样本索引、
 重采样时间差、各流消息序号、主机接收年龄和可用的 ROS header 时间戳。
-触觉没有标准 ROS header 时间戳时记0。序号变化代表收到新消息，不保证SDK内容更新。
-`metadata.json` 保存复用消息数、最大接收年龄和具体映射。
+触觉的 `*_ros_stamp_s` 是发布器的 `local_read_end`（SDK 交出这帧的主机时间；2026-11 之前录的数据记0），
+最后几列 `*_data_age_s` 是采样时这帧触觉的数据年龄。发布器每个 SDK 帧只发一次，所以触觉序号变化即代表
+有新的 SDK 帧。`metadata.json` 保存复用消息数、最大接收年龄、触觉最大数据年龄和具体映射。
+`check_episode_timing.py <episode 目录>` 可以检查这些时间（控制周期按录制循环的源样本算，不是 30 Hz 行之间的间隔）。
 
 EEF 每臂10列：`xyz + R[:,0] + R[:,1] + gripper`，左臂在前。
 位置单位为米，参考系分别是两从臂自身的 base frame；工具坐标系使用当前 Interbotix
