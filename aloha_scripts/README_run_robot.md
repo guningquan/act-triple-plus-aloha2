@@ -314,6 +314,42 @@ python imitate_episodes_multi_gpu.py \
 
 `--resume_ckpt_path` 只加载模型权重，不恢复 optimizer 状态和 step 计数，所以 `--num_steps` 填的是"这次新训练要跑多少步"。`dataset_stats.pkl`（归一化用的均值方差）每次训练都会在 `--ckpt_dir` 里重新算一份，eval 时也是读新 ckpt_dir 自己的 stats，新旧 checkpoint 之间不会因为数据集变了对不上，不用担心。练完之后照常 `--eval --ckpt_dir <新 ckpt_dir>` 部署，没有额外转换步骤。
 
+### LeRobot v3.0（lerobot 仓库训练 pi05 / MolmoAct2 / ACT）
+
+lerobot 仓库训练用的是 LeRobot v3.0 数据集（和 openpi 用的 v2.1 不是同一个版本）。下面两个脚本都在本目录，但要 import lerobot，所以用 **lerobot 的 venv**（Python 3.12）运行，不是 conda 环境 `aloha`：
+
+```bash
+source /mnt/server_ssd2/Programs_server/lerobot/.venv/bin/activate
+cd /mnt/server_ssd2/Programs_server/act-triple-plus-aloha2
+```
+
+**hdf5（含 `hil_rollout.py` 切出来的纠正段）→ v3.0**：`--raw-dir` 可以给多个目录，按顺序合成一个数据集；同一个目录写两次就转两份（相当于复制 k 份抬高占比）。动作按录制时的绝对值存，`meta/stats.json` 是全部数据的精确分位数，`meta/source_episodes.tsv` 记每条 episode 的来源文件。
+
+```bash
+python aloha_scripts/convert_aloha_hdf5_to_lerobot_v30.py \
+  --raw-dir /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2 \
+            /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil_corrections \
+  --output-dir /home/robot/Dataset_and_Checkpoint/lerobot-dataset/packaging_simple_2_hil_v30 \
+  --task "packaging the items" --fps 50
+```
+
+多份数据要一起转，不要分开转完再用 `lerobot-edit-dataset merge` 合并：LeRobot 的合并和重算统计都只保留每条 episode 分位数的包络（q01 取各 episode 里最小的 q01），范围偏宽。
+
+**`lerobot-rollout --strategy.type=dagger` 录的 HIL → 并进已有的 v3.0 数据集**：dagger 只写它自己的 `rollout_*` 数据集（每次纠正一条 episode），不会动训练用的数据集。合并输出一个新数据集，输入都不改：
+
+```bash
+python aloha_scripts/merge_hil_into_lerobot_v30.py \
+  --base /home/robot/Dataset_and_Checkpoint/lerobot-dataset/packaging_simple_2_v30 \
+  --hil /home/robot/Dataset_and_Checkpoint/lerobot-dataset/rollout_packaging_hil \
+  --output-dir /home/robot/Dataset_and_Checkpoint/lerobot-dataset/packaging_simple_2_v30_hil
+```
+
+两种数据集的特征不同，脚本会先对齐：去掉 HIL 的 `intervention`（纠正模式下全是 True）和 `cam_low`，去掉 base 的 velocity/effort（dagger 不录；pi05、MolmoAct2、ACT 只用 `observation.state`），`robot_type` 统一成 base 的。视频直接拼接不重编码，统计重算成精确分位数，最后打印 HIL 帧的占比。HIL 必须是加了 `--robot.gripper_state_format=aloha2` 录的。
+
+**两种 HIL 一起用**：先用转换脚本把示教和 `hil_rollout.py` 的纠正段一起转成 v3.0，再用合并脚本把 dagger 数据集并上去。顺序不能反（hdf5 只能走转换脚本，LeRobot 数据集只能走合并脚本）；dagger 的数据也不能反过来给本仓库的 ACT 或 openpi 用。要达到 `hil_compare_lengths.py` 算出的 k 份，就把纠正段目录在 `--raw-dir` 里写 k 次。两种方式的对比和完整流程见 lerobot 仓库的 `examples/aloha_ros/README_CN.md` 第 10 节。
+
+之后在 lerobot 仓库里，用 `lerobot-train --policy.path=<旧 pretrained_model> --dataset.root=<新数据集> ...` 接着旧模型练（归一化统计自动换成新数据集的，不要用 `--resume=true`），完整命令见 lerobot 仓库的 `examples/aloha_ros/README_CN.md` 第 8、10 节。
+
 ### openpi / pi0.5（服务器端）
 
 openpi 不直接吃原始 hdf5，训练用的是 LeRobot 格式数据集（`serve_policy.py` 部署时读的 `norm_stats.json` 就在这个数据集目录下）。以下流程已经在服务器上对着真实脚本和历史 log（`packaging_simple_2_plus_pipeline.log`）核对过：

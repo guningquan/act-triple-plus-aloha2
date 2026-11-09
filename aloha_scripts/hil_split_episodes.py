@@ -12,7 +12,7 @@ Both raw formats are handled, detected per episode:
   episode_N.hdf5  every dataset whose first axis is time is sliced (compress_len tables along their
                   time axis), attrs are copied, hil_source records where the segment came from.
                   Output: <out_dir>/episode_K.hdf5 for openpi's convert_aloha_data_to_lerobot_*.py,
-                  lerobot's convert_aloha_hdf5_to_lerobot_v30.py and ACT training.
+                  this directory's convert_aloha_hdf5_to_lerobot_v30.py and ACT training.
   episode_N/      (VTLA) CSV rows are sliced (timestamps restarted at 0), each video is re-encoded
                   to exactly the segment's frames with record_episodes_aloha2_vtla.write_video,
                   metadata.json gets the new total_frames. Output: <out_dir>/episode_K/ for N0-VTLA's

@@ -398,6 +398,42 @@ python imitate_episodes_multi_gpu.py \
 新しい ckpt_dir 自身のstatsを読むので、データセットが変わっても新旧のcheckpointで食い違うことはなく、心配は要りません。学習後は通常どおり
 `--eval --ckpt_dir <新しい ckpt_dir>` でデプロイでき、追加の変換は不要です。
 
+### LeRobot v3.0（lerobot リポジトリで pi05 / MolmoAct2 / ACT を学習）
+
+lerobot リポジトリの学習には LeRobot v3.0 データセットを使います（openpi が使う v2.1 とは別のバージョン）。以下の 2 つのスクリプトはこのディレクトリにありますが、lerobot を import するので、conda 環境 `aloha` ではなく **lerobot の venv**（Python 3.12）で実行します：
+
+```bash
+source /mnt/server_ssd2/Programs_server/lerobot/.venv/bin/activate
+cd /mnt/server_ssd2/Programs_server/act-triple-plus-aloha2
+```
+
+**hdf5（`hil_rollout.py` から切り出した修正区間を含む）→ v3.0**：`--raw-dir` には複数のディレクトリを指定でき、指定した順に 1 つのデータセットにまとめます。同じディレクトリを 2 回書くと 2 回分変換されます（k 回コピーして比率を上げるのと同じ）。アクションは収録時の絶対値のまま保存し、`meta/stats.json` は全データの正確な分位点、`meta/source_episodes.tsv` には各エピソードの元ファイルが記録されます。
+
+```bash
+python aloha_scripts/convert_aloha_hdf5_to_lerobot_v30.py \
+  --raw-dir /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2 \
+            /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil_corrections \
+  --output-dir /home/robot/Dataset_and_Checkpoint/lerobot-dataset/packaging_simple_2_hil_v30 \
+  --task "packaging the items" --fps 50
+```
+
+複数のデータはまとめて変換してください。別々に変換してから `lerobot-edit-dataset merge` で結合すると、LeRobot の結合や統計の再計算はエピソードごとの分位点の包絡しか残さないため（q01 は各エピソードの q01 の最小値）、範囲が広めになります。
+
+**`lerobot-rollout --strategy.type=dagger` で記録した HIL → 既存の v3.0 データセットに追加**：dagger は自分の `rollout_*` データセット（修正 1 回 = 1 エピソード）にだけ書き込み、学習用のデータセットには手を付けません。結合結果は新しいデータセットとして出力し、入力はどれも変更しません：
+
+```bash
+python aloha_scripts/merge_hil_into_lerobot_v30.py \
+  --base /home/robot/Dataset_and_Checkpoint/lerobot-dataset/packaging_simple_2_v30 \
+  --hil /home/robot/Dataset_and_Checkpoint/lerobot-dataset/rollout_packaging_hil \
+  --output-dir /home/robot/Dataset_and_Checkpoint/lerobot-dataset/packaging_simple_2_v30_hil
+```
+
+2 種類のデータセットは特徴量が違うので、スクリプトが先に揃えます：HIL 側の `intervention`（修正モードではすべて True）と `cam_low` を削除し、base 側の velocity/effort を削除し（dagger は記録せず、pi05・MolmoAct2・ACT は `observation.state` しか使わない）、`robot_type` を base のものに統一します。動画は再エンコードせずに連結し、統計は正確な分位点で計算し直し、最後に HIL フレームの割合を表示します。HIL は `--robot.gripper_state_format=aloha2` を付けて記録したものでなければなりません。
+
+**2 種類の HIL を一緒に使う**：まず変換スクリプトでデモと `hil_rollout.py` の修正区間を一緒に v3.0 に変換し、その上に結合スクリプトで dagger のデータセットを加えます。順番は逆にできません（hdf5 は変換スクリプト、LeRobot データセットは結合スクリプトしか通せない）。dagger のデータを逆にこのリポジトリの ACT や openpi に使うこともできません。`hil_compare_lengths.py` が出した k 回分にするには、修正区間のディレクトリを `--raw-dir` に k 回書きます。2 つの方法の比較と全手順は lerobot リポジトリの `examples/aloha_ros/README_JA.md` 10 章を参照してください。
+
+その後 lerobot リポジトリで `lerobot-train --policy.path=<古い pretrained_model> --dataset.root=<新しいデータセット> ...` として既存モデルから続けて学習します（正規化の統計は新しいデータセットのものに自動で置き換わる。`--resume=true` は使わない）。完全なコマンドは lerobot リポジトリの `examples/aloha_ros/README_JA.md` 8 章・10 章を参照してください。
+
 ### openpi / pi0.5（サーバー側）
 
 openpiは元のhdf5を直接読まず、学習にはLeRobot形式のデータセットを使います（`serve_policy.py` がデプロイ時に読む `norm_stats.json` も

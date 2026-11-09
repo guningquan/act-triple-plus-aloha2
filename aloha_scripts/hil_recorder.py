@@ -3,7 +3,7 @@
 Hdf5HilEpisode  record_episodes_aloha2.py's HDF5 layout, byte for byte (JPEG quality 90 images
                 zero-padded to one width + /compress_len, float32 qpos/qvel/effort/action, zero
                 base_action, optional /observations/tactile), so openpi's
-                convert_aloha_data_to_lerobot_no_bgr2rgb*.py, lerobot's
+                convert_aloha_data_to_lerobot_no_bgr2rgb*.py, this directory's
                 convert_aloha_hdf5_to_lerobot_v30.py and ACT training read it unchanged. Images are
                 JPEG-encoded in a thread pool while recording (the plain recorder encodes after the
                 episode), which keeps a long episode's RAM bounded.

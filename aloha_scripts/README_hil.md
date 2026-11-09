@@ -7,16 +7,16 @@
 
 启动步骤与按键说明见 `README_run_robot.md`；只验证模型（不接管、不录制）用 `run_pi_policy.py` / `run_vtla_policy.py`。
 
-| 文件                      | 作用                                                                            |
-| ------------------------- | ------------------------------------------------------------------------------- |
-| `hil_rollout.py`        | 主脚本：推理执行、状态机、录制                                                  |
-| `policy_client.py`      | websocket 客户端；openpi / N0 观测适配器（`run_vtla_policy.py` 也用它）       |
-| `chunk_executor.py`     | 动作 chunk 执行：每 `--action_horizon` 步阻塞推理一次（同 openpi aloha_real） |
-| `hil_devices.py`        | 离合主臂（P 增益渐降释放、稳定检测、offset）、从臂指令与安全限制、按键/踏板     |
-| `hil_recorder.py`       | hdf5 / VTLA 两种格式的写入                                                      |
-| `hil_split_episodes.py` | 把 HIL episode 切成只含接管段（或自主段）的 episode                             |
+| 文件                       | 作用                                                                            |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| `hil_rollout.py`         | 主脚本：推理执行、状态机、录制                                                  |
+| `policy_client.py`       | websocket 客户端；openpi / N0 观测适配器（`run_vtla_policy.py` 也用它）       |
+| `chunk_executor.py`      | 动作 chunk 执行：每 `--action_horizon` 步阻塞推理一次（同 openpi aloha_real） |
+| `hil_devices.py`         | 离合主臂（P 增益渐降释放、稳定检测、offset）、从臂指令与安全限制、按键/踏板     |
+| `hil_recorder.py`        | hdf5 / VTLA 两种格式的写入                                                      |
+| `hil_split_episodes.py`  | 把 HIL episode 切成只含接管段（或自主段）的 episode                             |
 | `hil_compare_lengths.py` | 量原数据和接管数据的长度，算接管数据占原数据的百分比、要复制几份才到 10% / 20%  |
-| `tests/`                | 不接硬件的测试                                                                  |
+| `tests/`                 | 不接硬件的测试                                                                  |
 
 ## 环境
 
@@ -128,7 +128,7 @@ python3 aloha_scripts/hil_split_episodes.py <dataset>_hil <dataset>_hil_correcti
 
 切分时 hdf5 里按时间排列的数据（包括时间戳和触觉）一起切，`/metadata/tactile` 和 VTLA 的
 `tactile_runtime_config/` 每段原样保留。切分结果用原来的转换脚本即可（已验证）：openpi `convert_aloha_data_to_lerobot_no_bgr2rgb.py`（v2.1）、
-lerobot `examples/aloha_ros/convert_aloha_hdf5_to_lerobot_v30.py`（v3.0）、N0 `convert_canonical_data.py`。
+本目录的 `convert_aloha_hdf5_to_lerobot_v30.py`（LeRobot v3.0，用 lerobot 的 venv 运行）、N0 `convert_canonical_data.py`。
 训练时把接管段和原始示教数据放在一起（DAgger 聚合）。
 
 ## 4. 测试
