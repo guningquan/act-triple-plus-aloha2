@@ -68,6 +68,28 @@ CUDA_VISIBLE_DEVICES=0 python scripts/serve_policy.py --port 8000 \
   --policy.config=vtla_joint_posttrain --policy.dir=checkpoints/vtla_joint_posttrain/<exp>/<step>
 ```
 
+LeRobot 训练的模型（pi0.5、MolmoAct2、ACT、GR00T 等，要求是用本仓库 hdf5 转换的数据训练的）用 lerobot 仓库的
+`examples/aloha_ros/serve_policy_websocket.py`，协议和 openpi 相同，机器人端加 `--policy lerobot`。运行环境是服务器上
+的 conda 环境 `lerobot`（已经装好 `websockets`、`msgpack`）：
+
+```bash
+conda activate lerobot                        # /mnt/ssd1/guningquan/miniforge3/envs/lerobot
+cd /mnt/ssd2/guningquan/Programs_server/lerobot
+CUDA_VISIBLE_DEVICES=0 python examples/aloha_ros/serve_policy_websocket.py \
+  --policy_path <checkpoints/.../pretrained_model> --task "packaging the items" --port 8000
+```
+
+GR00T（例如 `outputs/picking_w_cover`）还要先装依赖（只需一次），命令同上，换 `--policy_path` 和 `--task`：
+
+```bash
+pip install "dm-tree>=0.1.8,<1.0.0" "timm>=1.0.0,<1.1.0" "decord>=0.6.0,<1.0.0" "diffusers>=0.38.0,<0.40.0"
+CUDA_VISIBLE_DEVICES=2 python examples/aloha_ros/serve_policy_websocket.py \
+  --policy_path /mnt/ssd2/guningquan/Programs_server/lerobot/outputs/picking_w_cover \
+  --task "picking ichigo to the cup" --port 8000
+```
+
+机器人端对应的 `run_pi_policy.py` / `hil_rollout.py` 命令见 lerobot 仓库 `examples/aloha_ros/README_CN.md` 9.4 节。
+
 看到服务开始监听（`Creating server ...`）即可。连不上 8000 端口时用 SSH 隧道，本机命令里改成 `--host 127.0.0.1`：
 
 ```bash
@@ -103,7 +125,7 @@ python3 aloha_scripts/hil_rollout.py ...     # HIL，见第 3 节
 
 ## 2. 正常执行（纯推理验证）
 
-只跑模型、不接管、不存数据，主臂不参与。openpi 用 `run_pi_policy.py`，N0 用 `run_vtla_policy.py`，两个脚本按键一致。
+只跑模型、不接管、不存数据，主臂不参与。openpi 和 LeRobot 模型用 `run_pi_policy.py`，N0 用 `run_vtla_policy.py`，两个脚本按键一致。
 
 ### openpi：`run_pi_policy.py`
 
@@ -126,6 +148,17 @@ python3 aloha_scripts/run_pi_policy.py --host 10.240.77.20 --port 8000 --prompt 
 - 每轮最长 `--max_episode_steps`（3000 tick = 60 s），跑满算完成一轮；中止的不计入 `--num_episodes`。
 - 每次推理执行 `--action_horizon`（50）步。
 
+### LeRobot 模型：`run_pi_policy.py --policy lerobot`
+
+```bash
+python3 aloha_scripts/run_pi_policy.py --policy lerobot --host 10.240.77.20 --port 8000 --num_episodes 10
+```
+
+服务器是 lerobot 的 `serve_policy_websocket.py`（见第 1 节终端 2）。按键、执行方式、安全限制都和上面的 openpi 一样，区别只在发送的观测：
+qpos、qvel、effort，加上 checkpoint 用到的相机（连接时由服务器告知，`--cameras` 可改），原始分辨率、JPEG 质量 90（和录制时一样，
+`--jpeg_quality` 可改），每次约 150 kB。`--prompt` 不给时用服务器的 `--task`。每次推理执行 `--action_horizon`（50）步，
+不超过模型返回的步数（比如 MolmoAct2 是 30）。
+
 ### N0-VTLA：`run_vtla_policy.py`
 
 ```bash
@@ -143,6 +176,10 @@ python3 aloha_scripts/run_vtla_policy.py --host 10.240.77.20 --port 8000 --actio
 # openpi，存 hdf5 到 /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil/episode_N.hdf5
 python3 aloha_scripts/hil_rollout.py --task_name packaging_simple_2 --policy openpi \
   --host 10.240.77.20 --port 8000 --prompt "packaging the items" --num_episodes 20
+
+# LeRobot 模型（服务器跑 serve_policy_websocket.py），同样存 hdf5
+python3 aloha_scripts/hil_rollout.py --task_name packaging_simple_2 --policy lerobot \
+  --host 10.240.77.20 --port 8000 --num_episodes 20
 
 # N0-VTLA，存 VTLA 原始目录 <dataset_dir>_hil/episode_N/
 python3 aloha_scripts/hil_rollout.py --task_name aloha2_tactile_test --policy n0_joint \

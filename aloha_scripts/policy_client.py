@@ -1,7 +1,8 @@
 """Policy-server client shared by every script that runs a remote policy on this robot.
 
-openpi (scripts/serve_policy.py) and N0-VTLA (scripts/serve_policy.py) serve their policies with
-the same websocket + msgpack protocol: on connect the server sends one packed metadata dict, then
+openpi (scripts/serve_policy.py), N0-VTLA (scripts/serve_policy.py) and LeRobot checkpoints
+(lerobot's examples/aloha_ros/serve_policy_websocket.py) serve their policies with the same
+websocket + msgpack protocol: on connect the server sends one packed metadata dict, then
 every send/recv pair is one inference. PolicyClient speaks that protocol without importing
 openpi_client / n0vtla_client, so it runs under the ROS box's system Python 3.8 with only
 `websockets` and `msgpack` installed.
@@ -11,6 +12,8 @@ Each model needs its own observation layout, so the model-specific part lives in
                          openpi's examples/aloha_real client sends, {"state", "images", "prompt"}
     N0VtlaAdapter        N0-VTLA vtla_tactile_posttrain (eef) / vtla_joint_posttrain (joint):
                          the observation run_vtla_policy.py sends, including the four tactile views
+    LerobotAlohaAdapter  LeRobot checkpoints trained on these hdf5 episodes (pi0.5, MolmoAct2, ACT,
+                         GR00T, ...): {"state", "velocity", "effort", "images" (JPEG), "prompt"}
 An adapter turns one captured Frame into the server's observation (prepare) and the returned
 action chunk into (H, 14) follower commands (decode): [left arm 6 (rad), left gripper, right arm 6,
 right gripper], grippers as the normalized opening RealEnv.step() takes (0 = closed, 1 = open).
@@ -258,6 +261,64 @@ class OpenpiAlohaAdapter:
             image = resize_with_pad(np.asarray(image), self.resolution, self.resolution)
             images[camera] = np.ascontiguousarray(np.transpose(image, (2, 0, 1)))
         return {"state": np.asarray(frame.qpos, dtype=np.float64), "images": images, "prompt": self.prompt}
+
+    def decode(self, actions, frame):
+        actions = _finite_chunk(actions, 14)
+        return actions[:, :14].copy()
+
+
+class LerobotAlohaAdapter:
+    """LeRobot checkpoint served by lerobot's examples/aloha_ros/serve_policy_websocket.py.
+
+    The checkpoint was trained on a LeRobot dataset converted from these hdf5 episodes
+    (convert_aloha_hdf5_to_lerobot_v30.py), so the observation is the recorder's own: qpos, qvel and
+    effort (14,), and every camera the checkpoint uses at full resolution, JPEG-encoded at the
+    recorder's quality (the training images went through the same JPEG) to keep a request at a few
+    hundred kB. cv2 encodes the rgb8 bytes as they are and the server decodes them back unchanged,
+    so no channel swap happens anywhere. The server returns (n_action_steps, 14) absolute actions in
+    the hdf5 /action layout (relative-action checkpoints are converted back on the server).
+    """
+
+    name = "lerobot"
+    needs_vtla = False
+
+    def __init__(self, prompt, cameras, policy_hz=50.0, jpeg_quality=90):
+        self.prompt = prompt
+        self.cameras = tuple(cameras)
+        self.policy_hz = float(policy_hz)
+        self.jpeg_quality = int(jpeg_quality)
+
+    @classmethod
+    def from_metadata(cls, metadata, prompt, cameras=None, policy_hz=50.0, jpeg_quality=90):
+        """Adapter for the server's checkpoint: its cameras unless `cameras` is given."""
+        if metadata.get("server") != "lerobot":
+            raise RuntimeError("--policy lerobot needs lerobot's serve_policy_websocket.py; the server sent {}".format(
+                metadata))
+        if prompt is None and not metadata.get("default_task") and metadata.get("policy_type") not in (
+                "act", "diffusion", "vqbet"):
+            raise RuntimeError("The {} policy needs a task: pass --prompt or start the server with --task".format(
+                metadata.get("policy_type")))
+        return cls(prompt, cameras or metadata["cameras"], policy_hz=policy_hz, jpeg_quality=jpeg_quality)
+
+    def start_episode(self, frame):
+        pass
+
+    def prepare(self, frame):
+        import cv2
+
+        images = {}
+        for camera in self.cameras:
+            image = frame.images.get(camera)
+            if image is None:
+                raise RuntimeError("camera {} has not published yet".format(camera))
+            ok, encoded = cv2.imencode(".jpg", np.asarray(image), [int(cv2.IMWRITE_JPEG_QUALITY), self.jpeg_quality])
+            if not ok:
+                raise RuntimeError("JPEG encoding of {} failed".format(camera))
+            images[camera] = encoded.reshape(-1)
+        return {"state": np.asarray(frame.qpos, dtype=np.float32),
+                "velocity": np.asarray(frame.qvel, dtype=np.float32),
+                "effort": np.asarray(frame.effort, dtype=np.float32),
+                "images": images, "prompt": self.prompt}
 
     def decode(self, actions, frame):
         actions = _finite_chunk(actions, 14)

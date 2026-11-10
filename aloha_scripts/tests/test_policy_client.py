@@ -234,3 +234,44 @@ def test_solve_ik_reaches_poses_far_from_the_current_command():
     far = pose.copy()
     far[:3, 3] = [2.0, 0.0, 0.5]  # out of reach
     assert policy_client.solve_ik(arm, far[:3, 3], far[:3, :3], seed) is None
+
+
+LEROBOT_METADATA = {"server": "lerobot", "policy_type": "pi05", "cameras": ["cam_high", "cam_left_wrist"],
+                    "default_task": None, "n_action_steps": 50}
+
+
+def test_lerobot_adapter_sends_full_resolution_jpeg_and_numeric_state():
+    import cv2
+
+    rng = np.random.RandomState(0)
+    images = {name: rng.randint(0, 256, (480, 640, 3), dtype=np.uint8)
+              for name in ("cam_high", "cam_low", "cam_left_wrist", "cam_right_wrist")}
+    frame = Frame(0.0, np.linspace(-1, 1, 14), np.full(14, 0.5), np.full(14, -2.0), images)
+    adapter = policy_client.LerobotAlohaAdapter.from_metadata(LEROBOT_METADATA, "packaging the items")
+    assert adapter.cameras == ("cam_high", "cam_left_wrist") and adapter.policy_hz == 50.0
+    obs = unpackb(packb(adapter.prepare(frame)))  # what the server receives
+    assert sorted(obs["images"]) == ["cam_high", "cam_left_wrist"]
+    for name, buffer in obs["images"].items():
+        assert buffer.ndim == 1 and buffer.dtype == np.uint8
+        decoded = cv2.imdecode(buffer, cv2.IMREAD_COLOR)
+        # same pixels and channel order as the recorder's JPEG round trip, no BGR/RGB swap
+        reference = cv2.imdecode(cv2.imencode(".jpg", images[name], [int(cv2.IMWRITE_JPEG_QUALITY), 90])[1], 1)
+        np.testing.assert_array_equal(decoded, reference)
+    for key, value in (("state", frame.qpos), ("velocity", frame.qvel), ("effort", frame.effort)):
+        assert obs[key].dtype == np.float32
+        np.testing.assert_allclose(obs[key], value, rtol=1e-6)
+    assert obs["prompt"] == "packaging the items"
+    chunk = rng.randn(30, 14)
+    np.testing.assert_array_equal(adapter.decode(chunk, frame), chunk)
+
+
+def test_lerobot_adapter_checks_the_server_and_the_task():
+    with pytest.raises(RuntimeError, match="serve_policy_websocket"):
+        policy_client.LerobotAlohaAdapter.from_metadata({"reset_pose": [0.0] * 6}, "task")
+    with pytest.raises(RuntimeError, match="needs a task"):
+        policy_client.LerobotAlohaAdapter.from_metadata(LEROBOT_METADATA, None)
+    act = dict(LEROBOT_METADATA, policy_type="act")
+    assert policy_client.LerobotAlohaAdapter.from_metadata(act, None).prompt is None
+    served_task = dict(LEROBOT_METADATA, default_task="packaging the items")
+    adapter = policy_client.LerobotAlohaAdapter.from_metadata(served_task, None, cameras=["cam_high"])
+    assert adapter.cameras == ("cam_high",)

@@ -111,7 +111,7 @@ def test_homing_restores_the_per_tick_trajectory_time():
     assert log[:2] == ["arms", "grippers"] and [entry[1] for entry in log[2:]] == [DT, DT]
 
 
-def test_main_with_faked_hardware(monkeypatch):
+def _run_main(monkeypatch, argv, metadata=None):
     log = []
 
     class FakeImageRecorder:
@@ -132,7 +132,7 @@ def test_main_with_faked_hardware(monkeypatch):
 
     class FakeClient:
         def __init__(self, host, port, infer_timeout_s=None):
-            self.uri, self.metadata, self.timeouts, self.observations = "ws://x", {}, [], []
+            self.uri, self.metadata, self.timeouts, self.observations = "ws://x", metadata or {}, [], []
 
         def infer(self, obs, timeout=None):
             self.timeouts.append(timeout)
@@ -153,11 +153,25 @@ def test_main_with_faked_hardware(monkeypatch):
     keyboards = iter([ScriptedKeyboard({0: ["right"], 30: ["right"]})])
     monkeypatch.setitem(sys.modules, "one_side_teleop", types.SimpleNamespace(KeyboardControl=lambda: next(keyboards)))
 
-    run_pi_policy.main(["--host", "server", "--num_episodes", "2", "--max_episode_steps", "20",
-                        "--prompt", "packaging the items"])
-    client = clients[0]
+    run_pi_policy.main(["--host", "server", "--num_episodes", "2", "--max_episode_steps", "20"] + argv)
+    return clients[0], log
+
+
+def test_main_with_faked_hardware(monkeypatch):
+    client, log = _run_main(monkeypatch, ["--prompt", "packaging the items"])
     assert client.timeouts[0] == 900.0 and all(t is None for t in client.timeouts[1:])
     assert client.observations[1]["prompt"] == "packaging the items"
     assert client.observations[1]["images"]["cam_high"].shape == (3, 224, 224)
     assert log.count("home") == 2  # initial homing + between the two rounds
     assert log[-2:] == ["client_closed", "shutdown"]
+
+
+def test_main_with_a_lerobot_server(monkeypatch):
+    metadata = {"server": "lerobot", "policy_type": "molmoact2", "cameras": ["cam_high", "cam_right_wrist"],
+                "default_task": "packaging the items", "n_action_steps": 30}
+    client, log = _run_main(monkeypatch, ["--policy", "lerobot"], metadata)
+    obs = client.observations[1]
+    assert sorted(obs["images"]) == ["cam_high", "cam_right_wrist"]  # the checkpoint's cameras
+    assert all(image.ndim == 1 and image.dtype == np.uint8 for image in obs["images"].values())  # JPEG
+    assert {"state", "velocity", "effort"} <= set(obs) and "prompt" not in obs  # server falls back to --task
+    assert log.count("home") == 2 and log[-2:] == ["client_closed", "shutdown"]

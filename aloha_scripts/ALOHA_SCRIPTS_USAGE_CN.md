@@ -14,8 +14,8 @@
 | `replay_episodes.py` | 读取一条 HDF5 的 `/action`，在真实 puppet 手臂上原样回放 |
 | `visualize_episodes_multi.py` | 离线画一条 HDF5 的 qpos/qvel/effort/action 曲线和相机帧，不碰机械臂 |
 | `run_vtla_policy.py` | 连接远端 N0-VTLA 策略服务器，在真机上跑推理闭环 |
-| `run_pi_policy.py` | 连接远端 openpi 策略服务器，在真机上纯推理验证（不接管、不录制），见 `README_run_robot.md` |
-| `hil_rollout.py` | 连接远端 openpi / N0 策略服务器，离合式人工接管 + 录制 HIL 数据，见 `README_run_robot.md` |
+| `run_pi_policy.py` | 连接远端 openpi 策略服务器（或加 `--policy lerobot` 连 lerobot 的 `serve_policy_websocket.py`），在真机上纯推理验证（不接管、不录制），见 `README_run_robot.md` |
+| `hil_rollout.py` | 连接远端 openpi / LeRobot / N0 策略服务器，离合式人工接管 + 录制 HIL 数据，见 `README_run_robot.md` |
 | `hil_split_episodes.py` | 把 HIL episode 切成只含接管段的 episode，见 `README_hil.md` |
 | `convert_aloha_hdf5_to_lerobot_v30.py` | 把一个或多个 `episode_*.hdf5` 目录转成一个 LeRobot v3.0 数据集（绝对动作，精确分位数统计），用 lerobot 的 venv 运行，见 `README_run_robot.md` 第 4 节 |
 | `merge_hil_into_lerobot_v30.py` | 把 `lerobot-rollout` dagger 录的 HIL 数据集并进一个 LeRobot v3.0 数据集（输出新数据集），用 lerobot 的 venv 运行，见 `README_run_robot.md` 第 4 节 |

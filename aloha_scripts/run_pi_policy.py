@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a trained openpi policy (pi0 / pi0.5 ALOHA config) on the real robot, for evaluation only.
+"""Run a trained openpi policy (pi0 / pi0.5 ALOHA config) or LeRobot checkpoint on the real robot, for evaluation only.
 
 Nothing is recorded and the leader arms are not used - hil_rollout.py is the script for taking over
 and collecting data. This is the act-triple counterpart of openpi's examples/aloha_real/main.py:
@@ -13,6 +13,14 @@ Server (in the openpi repo on the GPU box):
         --policy.dir=<openpi_checkpoints>/pi05_packaging_simple_2_full/packaging_simple_2_pt/20000
 Client (this machine, `conda activate aloha`, after roslaunch):
     python3 aloha_scripts/run_pi_policy.py --host 10.240.77.20 --port 8000 --prompt "packaging the items"
+
+A LeRobot checkpoint trained on these hdf5 episodes (pi0.5, MolmoAct2, ACT, GR00T, ...) runs the same
+way with --policy lerobot, served by lerobot's examples/aloha_ros/serve_policy_websocket.py:
+    python examples/aloha_ros/serve_policy_websocket.py --policy_path <.../pretrained_model> \
+        --task "packaging the items" --port 8000                       (server, lerobot repo)
+    python3 aloha_scripts/run_pi_policy.py --policy lerobot --host 10.240.77.20 --port 8000
+It sends qpos/qvel/effort and the checkpoint's cameras at full resolution (JPEG) instead of the
+224x224 openpi observation; the chunk execution, keys and safety limits are the same.
 
 Keys (terminal):
     RIGHT       start the round (the followers are homed first)
@@ -34,7 +42,7 @@ import time
 import numpy as np
 
 from chunk_executor import ChunkExecutor, PolicyError
-from policy_client import Frame, OpenpiAlohaAdapter, PolicyClient
+from policy_client import Frame, LerobotAlohaAdapter, OpenpiAlohaAdapter, PolicyClient
 
 DEFAULT_CAMERAS = ("cam_high", "cam_left_wrist", "cam_right_wrist")
 
@@ -45,15 +53,21 @@ class StaleImage(RuntimeError):
 
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--policy", choices=("openpi", "lerobot"), default="openpi",
+                        help="Server type: openpi serve_policy.py, or lerobot serve_policy_websocket.py")
     parser.add_argument("--host", required=True, help="Policy server host, e.g. 10.240.77.20")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--prompt", default=None,
-                        help="Task prompt; omitted -> the server config's default prompt")
+                        help="Task prompt; omitted -> the server config's default prompt (lerobot: its --task)")
     parser.add_argument("--num_episodes", type=int, default=1, help="Rounds to run (aborted rounds do not count)")
     parser.add_argument("--max_episode_steps", type=int, default=3000, help="Ticks per round (50 Hz)")
     parser.add_argument("--action_horizon", type=int, default=50, help="Chunk steps executed per inference")
-    parser.add_argument("--cameras", nargs="+", default=list(DEFAULT_CAMERAS), help="Cameras sent to the server")
-    parser.add_argument("--resolution", type=int, default=224, help="Client-side resize_with_pad size")
+    parser.add_argument("--cameras", nargs="+", default=None,
+                        help="Cameras sent to the server (openpi default: {}; lerobot default: the "
+                             "checkpoint's cameras)".format(" ".join(DEFAULT_CAMERAS)))
+    parser.add_argument("--resolution", type=int, default=224, help="openpi: client-side resize_with_pad size")
+    parser.add_argument("--jpeg_quality", type=int, default=90,
+                        help="lerobot: JPEG quality of the camera images sent (90 = the recorder's)")
     parser.add_argument("--infer_timeout", type=float, default=10.0, help="Seconds before a reply counts as lost")
     parser.add_argument("--warmup_timeout", type=float, default=900.0,
                         help="Timeout of the warm-up inference before the first round")
@@ -163,7 +177,12 @@ def main(argv=None):
 
     env = make_real_env(init_node=True, setup_robots=True)
     puppets = (env.puppet_bot_left, env.puppet_bot_right)
-    adapter = OpenpiAlohaAdapter(args.prompt, cameras=args.cameras, resolution=args.resolution)
+    if args.policy == "lerobot":
+        adapter = LerobotAlohaAdapter.from_metadata(client.metadata, args.prompt, cameras=args.cameras,
+                                                    jpeg_quality=args.jpeg_quality)
+    else:
+        adapter = OpenpiAlohaAdapter(args.prompt, cameras=args.cameras or DEFAULT_CAMERAS,
+                                     resolution=args.resolution)
 
     def infer(frame, timeout=None):
         obs = adapter.prepare(frame)

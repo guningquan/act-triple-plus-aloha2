@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Human-in-the-loop rollout of a remote policy on ALOHA, recording in the raw training formats.
 
-The policy runs on the GPU server inside its own repo (openpi or N0-VTLA scripts/serve_policy.py);
+The policy runs on the GPU server inside its own repo (openpi or N0-VTLA scripts/serve_policy.py, or
+lerobot's examples/aloha_ros/serve_policy_websocket.py for a LeRobot checkpoint, --policy lerobot);
 this script is the robot side: it captures observations, executes the returned action chunks,
 lets the operator take over with the leader arms (clutch-style, see hil_devices.ClutchLeader) and
 records every tick with phase/intervention labels (see hil_recorder.py).
@@ -13,7 +14,12 @@ records every tick with phase/intervention labels (see hil_recorder.py).
     Robot (this repo's ROS env, after `roslaunch aloha 4arms_teleop.launch` or the tactile launch):
         python3 aloha_scripts/hil_rollout.py --task_name packaging_simple_2 --policy openpi \
             --host 10.240.77.20 --port 8000 --prompt "packaging the items" --num_episodes 20
-    Evaluation without takeover or recording: run_pi_policy.py (openpi) / run_vtla_policy.py (N0).
+    LeRobot checkpoint (pi0.5, MolmoAct2, ACT, GR00T, ... trained on these hdf5 episodes):
+        python examples/aloha_ros/serve_policy_websocket.py --policy_path <.../pretrained_model> \
+            --task "packaging the items" --port 8000                      (server, lerobot repo)
+        python3 aloha_scripts/hil_rollout.py --task_name packaging_simple_2 --policy lerobot \
+            --host 10.240.77.20 --port 8000 --num_episodes 20              (robot)
+    Evaluation without takeover or recording: run_pi_policy.py (openpi, lerobot) / run_vtla_policy.py (N0).
     Before the first episode one warm-up inference is sent (openpi compiles the model on its first call; --warmup_timeout).
     Step-by-step guide: README_run_robot.md.
 
@@ -30,7 +36,7 @@ leaders driven onto the followers' pose over --align_s) -LEFT-> leaders released
 offset, eased in over --correction_blend_s; the first --correction_skip_s of each correction is not
 labelled as intervention) -LEFT-> paused (leaders locked, offset cleared) -RIGHT-> autonomous.
 
-Output: --format hdf5 (openpi / ACT / lerobot converters; default for --policy openpi) writes
+Output: --format hdf5 (openpi / ACT / lerobot converters; default for --policy openpi / lerobot) writes
 <output_dir>/episode_N.hdf5, --format vtla (N0-VTLA's convert_canonical_data.py; required for N0)
 writes <output_dir>/episode_N/. Default output_dir: the task's dataset_dir + "_hil".
 hil_split_episodes.py turns them into corrections-only (or autonomous-only) episodes.
@@ -360,18 +366,24 @@ HAPTICS_TUNING = ("start_open_ratio", "force_deadband", "force_full_scale", "wal
                   "wall_stiffness_max", "max_feedback_pwm", "close_speed_limit", "close_brake_gain")
 
 
+# Servers whose policies take the hdf5 recorder's observation (RealEnv); recorded as hdf5 by default
+HDF5_POLICIES = ("openpi", "lerobot")
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--task_name", required=True, help="Entry of constants.TASK_CONFIGS (cameras, length, dir)")
-    parser.add_argument("--policy", choices=("openpi", "n0_eef", "n0_joint"), required=True,
-                        help="Server type: openpi ALOHA config, or N0-VTLA eef/joint checkpoint")
+    parser.add_argument("--policy", choices=HDF5_POLICIES + ("n0_eef", "n0_joint"), required=True,
+                        help="Server type: openpi ALOHA config, LeRobot checkpoint (serve_policy_websocket.py), "
+                             "or N0-VTLA eef/joint checkpoint")
     parser.add_argument("--host", required=True, help="Policy server host, e.g. 10.240.77.20")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--prompt", default=None,
                         help="Task prompt sent with every inference (openpi: omitted -> the config's "
-                             "default prompt; N0: default 'Perform the task.')")
+                             "default prompt; lerobot: omitted -> the server's --task; "
+                             "N0: default 'Perform the task.')")
     parser.add_argument("--format", choices=("hdf5", "vtla"), default=None,
-                        help="Recording format; default hdf5 for openpi, vtla for N0 (which needs it)")
+                        help="Recording format; default hdf5 for openpi / lerobot, vtla for N0 (which needs it)")
     parser.add_argument("--output_dir", type=Path, default=None, help="Default: task dataset_dir + '_hil'")
     parser.add_argument("--num_episodes", type=int, default=1, help="Episodes to save before exiting")
     parser.add_argument("--max_timesteps", type=int, default=None,
@@ -386,10 +398,13 @@ def build_parser():
                            help="Timeout of the one warm-up inference sent before the first episode (openpi "
                                 "compiles the model on its first call, which can take minutes)")
     inference.add_argument("--policy_hz", type=float, default=None,
-                           help="Rate the chunk steps are played at (default: openpi 50, N0 30)")
-    inference.add_argument("--policy_cameras", nargs="+", default=["cam_high", "cam_left_wrist", "cam_right_wrist"],
-                           help="openpi: cameras sent to the server")
+                           help="Rate the chunk steps are played at (default: openpi / lerobot 50, N0 30)")
+    inference.add_argument("--policy_cameras", nargs="+", default=None,
+                           help="Cameras sent to the server (openpi default: cam_high cam_left_wrist "
+                                "cam_right_wrist; lerobot default: the checkpoint's cameras)")
     inference.add_argument("--resolution", type=int, default=224, help="openpi: client-side resize_with_pad size")
+    inference.add_argument("--jpeg_quality", type=int, default=90,
+                           help="lerobot: JPEG quality of the camera images sent (90 = the recorder's)")
 
     hil = parser.add_argument_group("takeover")
     hil.add_argument("--absolute_takeover", action="store_true",
@@ -446,12 +461,14 @@ def build_parser():
 
 def resolve_args(args, parser):
     if args.format is None:
-        args.format = "hdf5" if args.policy == "openpi" else "vtla"
-    if args.policy != "openpi" and args.format != "vtla":
+        args.format = "hdf5" if args.policy in HDF5_POLICIES else "vtla"
+    if args.policy not in HDF5_POLICIES and args.format != "vtla":
         parser.error("N0-VTLA needs --format vtla (its tactile streams come from the VTLA capture)")
+    if args.policy_cameras is None and args.policy == "openpi":
+        args.policy_cameras = ["cam_high", "cam_left_wrist", "cam_right_wrist"]
     if args.aloha_action_space is None:
         args.aloha_action_space = "eef" if args.policy == "n0_eef" else "joint_position"
-    if args.policy != "openpi" and args.prompt is None:
+    if args.policy not in HDF5_POLICIES and args.prompt is None:
         args.prompt = "Perform the task."
     if args.max_joint_step is not None and args.max_joint_step <= 0:
         args.max_joint_step = None
@@ -493,7 +510,7 @@ def main(argv=None):
                            PUPPET_RIGHT_GRIPPER_JOINT_CLOSE, PUPPET_RIGHT_GRIPPER_JOINT_OPEN, TASK_CONFIGS)
     from hil_devices import ClutchLeader, ClutchLeaderPair, FollowerCommander, HilInput
     from hil_recorder import Hdf5HilEpisode, VtlaHilEpisode
-    from policy_client import Frame, N0VtlaAdapter, OpenpiAlohaAdapter, PolicyClient
+    from policy_client import Frame, LerobotAlohaAdapter, N0VtlaAdapter, OpenpiAlohaAdapter, PolicyClient
 
     for name in HAPTICS_TUNING + ("force_baseline_samples",):
         if not hasattr(args, name):
@@ -533,6 +550,9 @@ def main(argv=None):
     if args.policy == "openpi":
         adapter = OpenpiAlohaAdapter(args.prompt, cameras=args.policy_cameras, resolution=args.resolution,
                                      policy_hz=args.policy_hz or 50.0)
+    elif args.policy == "lerobot":
+        adapter = LerobotAlohaAdapter.from_metadata(client.metadata, args.prompt, cameras=args.policy_cameras,
+                                                    policy_hz=args.policy_hz or 50.0, jpeg_quality=args.jpeg_quality)
     else:
         adapter = N0VtlaAdapter(args.prompt, args.policy[len("n0_"):], sources, puppets, policy_hz=args.policy_hz)
 
@@ -550,7 +570,7 @@ def main(argv=None):
             obs = env.get_observation()
         except TactileStale as exc:
             raise StaleStream(str(exc))
-        if require_fresh and args.policy == "openpi":
+        if require_fresh and args.policy in HDF5_POLICIES:
             recorder = env.image_recorder
             now = rospy.get_time()
             for camera in adapter.cameras:
@@ -566,7 +586,7 @@ def main(argv=None):
     def infer(frame, timeout=None):
         obs = adapter.prepare(frame)
         if obs.get("prompt", "") is None:
-            del obs["prompt"]  # openpi falls back to the training config's default prompt
+            del obs["prompt"]  # openpi / lerobot fall back to the config's / server's default prompt
         return adapter.decode(client.infer(obs, timeout=timeout)["actions"], frame)
 
     pedal_keys = {args.pedal_pause: "pause", args.pedal_correct: "correct", args.pedal_end: "end"}

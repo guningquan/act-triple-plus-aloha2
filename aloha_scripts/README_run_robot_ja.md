@@ -74,6 +74,28 @@ CUDA_VISIBLE_DEVICES=0 python scripts/serve_policy.py --port 8000 \
   --policy.config=vtla_joint_posttrain --policy.dir=checkpoints/vtla_joint_posttrain/<exp>/<step>
 ```
 
+LeRobot で学習したモデル（pi0.5、MolmoAct2、ACT、GR00T など。このリポジトリの hdf5 から変換したデータで学習したもの）は
+lerobot リポジトリの `examples/aloha_ros/serve_policy_websocket.py` を使います。プロトコルは openpi と同じで、ロボット側は
+`--policy lerobot` を付けます。サーバー上の conda 環境 `lerobot`（`websockets`、`msgpack` はインストール済み）で実行します:
+
+```bash
+conda activate lerobot                        # /mnt/ssd1/guningquan/miniforge3/envs/lerobot
+cd /mnt/ssd2/guningquan/Programs_server/lerobot
+CUDA_VISIBLE_DEVICES=0 python examples/aloha_ros/serve_policy_websocket.py \
+  --policy_path <checkpoints/.../pretrained_model> --task "packaging the items" --port 8000
+```
+
+GR00T（例：`outputs/picking_w_cover`）は先に依存パッケージをインストールし（初回のみ）、コマンドは上と同じで `--policy_path` と `--task` を替えます：
+
+```bash
+pip install "dm-tree>=0.1.8,<1.0.0" "timm>=1.0.0,<1.1.0" "decord>=0.6.0,<1.0.0" "diffusers>=0.38.0,<0.40.0"
+CUDA_VISIBLE_DEVICES=2 python examples/aloha_ros/serve_policy_websocket.py \
+  --policy_path /mnt/ssd2/guningquan/Programs_server/lerobot/outputs/picking_w_cover \
+  --task "picking ichigo to the cup" --port 8000
+```
+
+ロボット側の `run_pi_policy.py` / `hil_rollout.py` のコマンドは lerobot リポジトリの `examples/aloha_ros/README_JA.md` 9.4 節を参照してください。
+
 サービスがリスニングを開始したこと（`Creating server ...`）を確認してください。8000番ポートに
 接続できない場合はSSHトンネルを使い、本機側のコマンドでは `--host 127.0.0.1` に変更します。
 
@@ -115,8 +137,8 @@ KEY_A）、←（`--pedal_correct`、KEY_B）、e（`--pedal_end`、KEY_C）に�
 
 ## 2. 通常実行（推論のみの確認）
 
-モデルを動かすだけで、介入もデータ保存も行わず、マスターアームは使用しません。openpiは
-`run_pi_policy.py`、N0は `run_vtla_policy.py` を使い、両スクリプトのキー操作は同じです。
+モデルを動かすだけで、介入もデータ保存も行わず、マスターアームは使用しません。openpiと
+LeRobotのモデルは `run_pi_policy.py`、N0は `run_vtla_policy.py` を使い、両スクリプトのキー操作は同じです。
 
 ### openpi: `run_pi_policy.py`
 
@@ -143,6 +165,17 @@ python3 aloha_scripts/run_pi_policy.py --host 10.240.77.20 --port 8000 --prompt 
   中止したものは `--num_episodes` に数えられません。
 - 1回の推論ごとに `--action_horizon`（50）ステップ実行します。
 
+### LeRobot のモデル: `run_pi_policy.py --policy lerobot`
+
+```bash
+python3 aloha_scripts/run_pi_policy.py --policy lerobot --host 10.240.77.20 --port 8000 --num_episodes 10
+```
+
+サーバーは lerobot の `serve_policy_websocket.py`（第1節のターミナル2を参照）。キー操作・実行方式・安全制限は上の openpi と同じで、
+違うのは送る観測だけです: qpos、qvel、effort と、checkpoint が使うカメラ（接続時にサーバーから通知、`--cameras` で変更可）を
+元の解像度で JPEG 品質 90（収録時と同じ、`--jpeg_quality` で変更可）にしたもので、1回あたり約 150 kB。`--prompt` を省略すると
+サーバーの `--task` を使います。1回の推論ごとに `--action_horizon`（50）ステップ実行し、モデルが返すステップ数（例えば MolmoAct2 は 30）が上限です。
+
 ### N0-VTLA: `run_vtla_policy.py`
 
 ```bash
@@ -161,6 +194,10 @@ python3 aloha_scripts/run_vtla_policy.py --host 10.240.77.20 --port 8000 --actio
 # openpi、hdf5を /home/robot/Dataset_and_Checkpoint/dataset/packaging_simple_2_hil/episode_N.hdf5 に保存
 python3 aloha_scripts/hil_rollout.py --task_name packaging_simple_2 --policy openpi \
   --host 10.240.77.20 --port 8000 --prompt "packaging the items" --num_episodes 20
+
+# LeRobot のモデル（サーバーで serve_policy_websocket.py を実行）、同じく hdf5 で保存
+python3 aloha_scripts/hil_rollout.py --task_name packaging_simple_2 --policy lerobot \
+  --host 10.240.77.20 --port 8000 --num_episodes 20
 
 # N0-VTLA、VTLA形式の生データディレクトリ <dataset_dir>_hil/episode_N/ に保存
 python3 aloha_scripts/hil_rollout.py --task_name aloha2_tactile_test --policy n0_joint \

@@ -93,6 +93,13 @@ class FakeClient:
         pass
 
 
+
+class FakeLerobotClient(FakeClient):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.metadata = {"server": "lerobot", "policy_type": "pi05", "cameras": ["cam_high", "cam_left_wrist"],
+                         "default_task": "packaging the items", "n_action_steps": 50}
+
 class ScriptedHilInput:
     script = {}
 
@@ -213,3 +220,28 @@ def test_main_n0_joint_records_vtla_episode(tmp_path, monkeypatch):
     rows = list(csv.DictReader((episode / "hil" / "data.csv").open()))
     assert meta["aloha_action_space"] == "joint_position" and meta["hil"]["policy"] == "n0_joint"
     assert len(rows) == meta["total_frames"] and any(r["phase"] == "2" for r in rows)
+
+
+def test_main_lerobot_records_hdf5_with_the_checkpoints_cameras(tmp_path, monkeypatch):
+    env, masters, log = FakeEnv(), (FakeBot(gripper=0.6), FakeBot(gripper=0.6)), []
+    monkeypatch.setitem(sys.modules, "record_episodes_aloha2", make_legacy(env, masters, log))
+    clients = []
+    monkeypatch.setattr(policy_client, "PolicyClient",
+                        lambda *a, **k: clients.append(FakeLerobotClient(*a, **k)) or clients[-1])
+    import hil_devices
+
+    ScriptedHilInput.script = {0: ["pause"], 9: ["pause"], 40: ["end"], 41: ["pause"]}
+    monkeypatch.setattr(hil_devices, "HilInput", ScriptedHilInput)
+    FakeArmHaptics.instances = []
+
+    hil_rollout.main(["--task_name", "packaging_simple_2", "--policy", "lerobot", "--host", "server",
+                      "--output_dir", str(tmp_path), "--max_timesteps", "200"])
+
+    obs = clients[0].observations[1]
+    assert sorted(obs["images"]) == ["cam_high", "cam_left_wrist"]  # from the server's metadata
+    assert all(image.ndim == 1 for image in obs["images"].values())  # JPEG buffers
+    assert {"state", "velocity", "effort"} <= set(obs) and "prompt" not in obs
+    with h5py.File(str(tmp_path / "episode_0.hdf5"), "r") as f:  # recorded in the hdf5 format
+        assert f.attrs["hil_policy"] == "lerobot"
+        assert sorted(f["observations/images"]) == ["cam_high", "cam_left_wrist", "cam_right_wrist"]
+        assert len(f["hil/phase"][()]) > 0
