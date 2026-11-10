@@ -34,7 +34,12 @@ HUMAN_COLOR = (0, 0, 220)  # BGR: red
 
 
 def decode_cam(dataset):
-    return [cv2.imdecode(row, cv2.IMREAD_COLOR) for row in dataset[()]]
+    """Decoded frames in BGR, which is what cv2.VideoWriter / cv2.rectangle / cv2.putText expect.
+
+    The recorders store the cameras' rgb8 bytes through cv2.imencode, which does not swap channels, so
+    imdecode returns RGB-ordered arrays. Writing those as they are would swap red and blue in the video.
+    """
+    return [cv2.cvtColor(cv2.imdecode(row, cv2.IMREAD_COLOR), cv2.COLOR_RGB2BGR) for row in dataset[()]]
 
 
 def label_of(phase, intervention, i):
