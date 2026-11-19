@@ -67,7 +67,7 @@ class TactileHistory:
 
 
 class AsyncProbe:
-    def __init__(self, client, every=5, codec="jpg", thread_factory=threading.Thread, tactile_size=(224, 224)):
+    def __init__(self, client, every=5, codec="png", thread_factory=threading.Thread, tactile_size=(224, 224)):
         self.client = client
         self.every = max(1, int(every))
         self.codec = codec
@@ -227,7 +227,7 @@ class AsyncRefine:
     time; JPEG encoding runs in the worker, outside the client lock. The reply also carries the C-fresh decision
     (per-pad surprise + CUSUM on the server): ``fresh()`` turns True when a reply of the current plan says so."""
 
-    def __init__(self, client, codec="jpg", timeout_s=2.0, clock=time.monotonic, thread_factory=threading.Thread,
+    def __init__(self, client, codec="png", timeout_s=2.0, clock=time.monotonic, thread_factory=threading.Thread,
                  tactile_size=(224, 224)):
         self.client = client
         self.codec = codec

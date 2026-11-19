@@ -82,11 +82,17 @@ def test_predict_wire_format_and_lossless_png():
     probe = server.requests[2]
     assert probe["cmd"] == "seg_step" and probe["k"] == 10 and probe["force"] is False and reply["fresh"] is True
     assert "observation/left_wrist_left_tactile_hist8" in probe
-    jpg = decode(probe["observation/left_wrist_left_tactile"]).astype(int)   # JPEG for probes: lossy, RGB kept
-    # probes go at the model size (224 x 224, letterboxed like the server's resize): 70 x 40 -> 224 x 128 + 48 px bars
+    small = decode(probe["observation/left_wrist_left_tactile"])
+    # probes go at the model size (224 x 224, letterboxed like the server's resize): 70 x 40 -> 224 x 128 + 48 px bars,
+    # PNG by default, so exactly the resized frame (lossless)
+    assert small.shape == (224, 224, 3)
+    np.testing.assert_array_equal(small, vzc.resize_with_pad(flat["left_wrist_left_tactile"], 224, 224))
+    assert small[:, :40].max() == 0 and small[:, -40:].max() == 0
+    # the optional JPEG codec still works: lossy, RGB kept
+    fields = vzc.tactile_fields(flat, {}, codec="jpg", size=vzc.MODEL_TACTILE_SIZE)
+    jpg = decode(fields["observation/left_wrist_left_tactile"]).astype(int)
     assert jpg.shape == (224, 224, 3)
     assert np.abs(jpg[20:204, 60:164] - np.array([200, 30, 60])).max() <= 4
-    assert jpg[:, :40].max() <= 4 and jpg[:, -40:].max() <= 4
 
 
 def test_server_error_and_missing_views_raise():
@@ -181,9 +187,8 @@ def test_prepare_and_refine_wire_format():
     assert len(ref["state"]) == 32 and ref["state"][:14] == pytest.approx(list(np.arange(14) * 0.5))
     assert not any(key in ref for key in vzc.CAM_WIRE_KEYS.values())    # touch only
     for v in vzc.TAC_VIEWS:
-        jpg = decode(ref["observation/" + v]).astype(int)               # JPEG at the model size by default
-        assert jpg.shape == (224, 224, 3)
-        assert np.abs(jpg[20:204, 60:164] - np.array([200, 30, 60])).max() <= 4
+        got = decode(ref["observation/" + v])                           # PNG at the model size by default: exact
+        np.testing.assert_array_equal(got, vzc.resize_with_pad(flat[v], 224, 224))
         assert decode(ref["observation/{}_hist8".format(v)]).shape == (224, 224, 3)
     assert reply["actions"].shape == (50, 14) and (reply["actions"] == 0.5).all()
     assert reply["stale"] is False and reply["fresh"] is False and reply["surprise"] == [0.1] * 4

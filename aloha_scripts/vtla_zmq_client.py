@@ -21,8 +21,10 @@ camera keys   observation/image (cam_high), observation/wrist_image (cam_left_wr
 tactile keys  observation/<view>  for the 4 model views (left_wrist_left_tactile, ...), the CURRENT frames
 history keys  observation/<view>_hist<k>  the frame k control steps before (Direction 3; the first frame of the episode
               while fewer than k steps have passed)
-Images go as PNG bytes of the BGR image (lossless; the server cv2-decodes and flips back to RGB), or JPEG with
-``codec="jpg"`` (smaller and faster, for the per-step probes). predict / prepare send the NATIVE tactile frames (the
+Images go as PNG bytes of the BGR image (lossless; the server cv2-decodes and flips back to RGB) by default, for every
+request, or JPEG with ``codec="jpg"`` (smaller and faster but lossy: JPEG quality 95 on a tactile frame moves the Sparsh
+register token about as much as 5 control steps of real motion do, measured 2026-11-19, while the chunk-start baseline
+stays lossless, so the in-chunk comparison would read the compression as touch; PNG became the probe / refine default). predict / prepare send the NATIVE tactile frames (the
 original N0-VTLA client does the same; the server resizes them). seg_step / refine resize the tactile frames to the
 model size (224 x 224, ``MODEL_TACTILE_SIZE``) BEFORE encoding by default, with the same function the server's input
 transforms use (``resize_with_pad``, copied from n0vtla_client.image_tools), so the model sees the same tensors while
@@ -226,7 +228,7 @@ class VtlaZmqClient:
         self.last_infer_time_ms = reply.get("infer_time_ms")
         return actions, int(reply["plan"])
 
-    def refine(self, plan_id, m, executed, tacs, tacs_hist=None, state=None, force=False, codec="jpg",
+    def refine(self, plan_id, m, executed, tacs, tacs_hist=None, state=None, force=False, codec="png",
                timeout_s=None, tactile_size=MODEL_TACTILE_SIZE):
         """In-chunk correction after m commanded steps of plan ``plan_id`` -> the server's reply dict, with
         ``actions`` parsed to the full corrected (H, 14) chunk, or None when the reply carries none (stale plan or
@@ -249,7 +251,7 @@ class VtlaZmqClient:
             reply["actions"] = self._parse_actions(reply)
         return reply
 
-    def seg_step(self, k, p, tacs, tacs_hist=None, force=False, codec="jpg", tactile_size=MODEL_TACTILE_SIZE):
+    def seg_step(self, k, p, tacs, tacs_hist=None, force=False, codec="png", tactile_size=MODEL_TACTILE_SIZE):
         """Direction 2 probe at k control steps after the chunk start (plan index p) -> the server's reply dict.
         tactile_size: resize the tactile frames to the model size before encoding (default; None = native frames)."""
         msg = {"cmd": "seg_step", "k": int(k), "p": int(p), "force": bool(force)}

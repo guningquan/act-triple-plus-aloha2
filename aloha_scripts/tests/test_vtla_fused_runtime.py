@@ -79,7 +79,7 @@ def test_probe_schedule_fresh_flag_and_chunk_ids():
     for k in range(1, 13):
         probe.maybe_probe(k, k, {"t": k}, {8: {"t": k - 8}})
     assert [c[0] for c in client.calls] == [5, 10]
-    assert client.calls[0][3] == {8: {"t": -3}} and client.calls[0][4] == "jpg"
+    assert client.calls[0][3] == {8: {"t": -3}} and client.calls[0][4] == "png"
     assert probe.fresh()
     replies = probe.drain()
     assert [(c, k, r["fresh"]) for c, k, r in replies] == [(0, 5, False), (0, 10, True)]
@@ -243,8 +243,8 @@ class FakeClient:
 def make_args(fused, **over):
     a = argparse.Namespace(data="hdf5", fps=None, state_gripper=None, hist=None, prompt="plug it in",
                            action_horizon=50, max_episode_steps=60, gripper_moving_time=None, max_stream_age=0.5,
-                           codec="png", probe_every=0, probe_codec="jpg", takeover_after=0, takeover_window=None,
-                           refine=False, refine_codec="jpg", refine_timeout=2.0, refine_every=1, refine_max_delta=0.0,
+                           codec="png", probe_every=0, probe_codec="png", takeover_after=0, takeover_window=None,
+                           refine=False, refine_codec="png", refine_timeout=2.0, refine_every=1, refine_max_delta=0.0,
                            refine_max_grip_delta=0.0, refine_stop=None)
     vars(a).update(over)
     return fused.resolve_args(a)
@@ -601,7 +601,7 @@ def test_refine_corrections_land_on_the_next_step(fused, monkeypatch):
     for r in client.refines:                            # executed = the rows actually commanded
         np.testing.assert_allclose(r["executed"][:, 0], goals[:r["m"], 0])
         assert r["executed"].shape == (r["m"], 14) and r["state"].shape == (32,)
-        assert r["codec"] == "jpg" and r["timeout_s"] == 2.0
+        assert r["codec"] == "png" and r["timeout_s"] == 2.0
     assert client.refines[9]["hist"][8]["left_wrist_left_tactile"][0, 0, 0] == 3   # m = 10 at step 10: t-8 = snap 3
     refines = [r for r in log if r["event"] == "refine"]
     assert len(refines) == 46 and all(r["d"] == 0 and r["start"] == r["m"] for r in refines)
@@ -675,7 +675,8 @@ def test_refine_flag_conflicts(fused):
         make_args(fused, refine=True, refine_stop=-1)
     p = fused.build_arg_parser()
     a = p.parse_args(["--host", "h", "--data", "hdf5"])
-    assert a.refine is False and a.refine_codec == "jpg" and a.refine_timeout == 2.0 and a.refine_stop is None
+    assert a.refine is False and a.refine_codec == "png" and a.probe_codec == "png" and a.refine_timeout == 2.0 \
+        and a.refine_stop is None
     a = p.parse_args(["--host", "h", "--data", "hdf5", "--refine", "--refine-max-delta", "0.05", "--refine-every", "3"])
     assert a.refine and a.refine_max_delta == 0.05 and a.refine_every == 3 and a.refine_max_grip_delta == 0.0
 

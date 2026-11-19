@@ -104,7 +104,9 @@ def build_arg_parser():
     p.add_argument("--codec", choices=("png", "jpg"), default="png", help="image encoding of the chunk predicts")
     p.add_argument("--probe-every", "--probe_every", dest="probe_every", type=int, default=0,
                    help="Direction 2 C-fresh probe every N steps (0 = off; needs a server with VTLA_DIR2_C_FRESH=1)")
-    p.add_argument("--probe-codec", "--probe_codec", dest="probe_codec", choices=("png", "jpg"), default="jpg")
+    p.add_argument("--probe-codec", "--probe_codec", dest="probe_codec", choices=("png", "jpg"), default="png",
+                   help="image encoding of the probes (png = lossless, the default; jpg is lossy and shifts the "
+                        "Sparsh features the in-chunk comparison reads)")
     p.add_argument("--probe-full-res", "--probe_full_res", dest="probe_full_res", action="store_true",
                    help="send NATIVE tactile frames with probes / refines (default: resized to the model size 224 on "
                         "the robot, same resize as the server; only needed for a server older than 2026-11-18)")
@@ -115,7 +117,8 @@ def build_arg_parser():
     p.add_argument("--refine", action="store_true",
                    help="in-chunk tactile correction (prepare / refine; needs a server with VTLA_REFINE_CKPT and "
                    "VTLA_DIR2_C_FRESH=1); replaces --probe-every")
-    p.add_argument("--refine-codec", "--refine_codec", dest="refine_codec", choices=("png", "jpg"), default="jpg")
+    p.add_argument("--refine-codec", "--refine_codec", dest="refine_codec", choices=("png", "jpg"), default="png",
+                   help="image encoding of the refine requests (png = lossless, the default; jpg is lossy)")
     p.add_argument("--refine-timeout", "--refine_timeout", dest="refine_timeout", type=float, default=2.0,
                    help="reply timeout of one refine (s); short, so a lost reply cannot hold the next prepare")
     p.add_argument("--refine-every", "--refine_every", dest="refine_every", type=int, default=1,
