@@ -1,0 +1,1913 @@
+{
+ "files": {
+  "observe_00_observe.reply.msgpack": {
+   "shrunk": {}
+  },
+  "observe_00_observe.request.msgpack": {
+   "condition": "p0_fault",
+   "injected": null,
+   "session": "fg-20261117-040532-3b577feb",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "p0_00_reset.reply.msgpack": {
+   "shrunk": {}
+  },
+  "p0_00_reset.request.msgpack": {
+   "condition": "p0",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {}
+  },
+  "p0_01_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "p0_01_plan.request.msgpack": {
+   "condition": "p0",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "p0_02_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "p0_02_plan.request.msgpack": {
+   "condition": "p0",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "p0_03_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "p0_03_plan.request.msgpack": {
+   "condition": "p0",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_00_reset.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_dynamic_00_reset.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {}
+  },
+  "tg_dynamic_01_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_01_plan.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_02_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_02_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_03_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_03_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_04_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_04_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_05_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_05_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_06_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_06_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_07_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_07_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_08_refresh.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_dynamic_08_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_09_refresh.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_dynamic_09_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_10_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_10_plan.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_11_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_11_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_12_refresh.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_dynamic_12_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_13_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_13_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_14_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_14_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_15_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_15_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_16_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_16_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_17_refresh.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_dynamic_17_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_18_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_18_refresh.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_19_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_dynamic_19_plan.request.msgpack": {
+   "condition": "tg_dynamic",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_00_reset.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_fault_00_reset.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {}
+  },
+  "tg_fault_01_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_01_plan.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_02_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_02_refresh.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_03_refresh.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_fault_03_refresh.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": {
+    "chunk": 0,
+    "expect": "stale chunk"
+   },
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_04_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_04_plan.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_05_refresh.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_05_refresh.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_06_refresh.reply.msgpack": {
+   "shrunk": {}
+  },
+  "tg_fault_06_refresh.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": {
+    "expect": "error",
+    "tactile_step": 60
+   },
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      1,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_07_plan.reply.msgpack": {
+   "shrunk": {
+    "actions": {
+     "shape": [
+      50,
+      14
+     ],
+     "stride": [
+      7,
+      1
+     ]
+    }
+   }
+  },
+  "tg_fault_07_plan.request.msgpack": {
+   "condition": "tg_fault",
+   "injected": null,
+   "session": "fg-20261117-040606-8c075cba",
+   "shrunk": {
+    "images/cam_high": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_left_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "images/cam_right_wrist": {
+     "shape": [
+      3,
+      224,
+      224
+     ],
+     "stride": [
+      1,
+      28,
+      28
+     ]
+    },
+    "noise": {
+     "shape": [
+      50,
+      32
+     ],
+     "stride": [
+      7,
+      4
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_inner": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    },
+    "tactile_frames/observation.images.right_gripper_outer": {
+     "shape": [
+      3,
+      224,
+      224,
+      3
+     ],
+     "stride": [
+      1,
+      28,
+      28,
+      1
+     ]
+    }
+   }
+  }
+ },
+ "format": 1,
+ "note": "arrays listed under 'shrunk' were strided down; expand() repeats them back to 'shape'",
+ "sequences": {
+  "observe": [
+   "observe_00_observe"
+  ],
+  "p0": [
+   "p0_00_reset",
+   "p0_01_plan",
+   "p0_02_plan",
+   "p0_03_plan"
+  ],
+  "tg_dynamic": [
+   "tg_dynamic_00_reset",
+   "tg_dynamic_01_plan",
+   "tg_dynamic_02_refresh",
+   "tg_dynamic_03_refresh",
+   "tg_dynamic_04_refresh",
+   "tg_dynamic_05_refresh",
+   "tg_dynamic_06_refresh",
+   "tg_dynamic_07_refresh",
+   "tg_dynamic_08_refresh",
+   "tg_dynamic_09_refresh",
+   "tg_dynamic_10_plan",
+   "tg_dynamic_11_refresh",
+   "tg_dynamic_12_refresh",
+   "tg_dynamic_13_refresh",
+   "tg_dynamic_14_refresh",
+   "tg_dynamic_15_refresh",
+   "tg_dynamic_16_refresh",
+   "tg_dynamic_17_refresh",
+   "tg_dynamic_18_refresh",
+   "tg_dynamic_19_plan"
+  ],
+  "tg_fault": [
+   "tg_fault_00_reset",
+   "tg_fault_01_plan",
+   "tg_fault_02_refresh",
+   "tg_fault_03_refresh",
+   "tg_fault_04_plan",
+   "tg_fault_05_refresh",
+   "tg_fault_06_refresh",
+   "tg_fault_07_plan"
+  ]
+ },
+ "server": {
+  "conditions": [
+   "p0",
+   "p0_fault",
+   "tg_chunk",
+   "tg_dynamic",
+   "tg_fault",
+   "tg_refresh"
+  ],
+  "dynamic_thresholds": [
+   0.002,
+   0.01
+  ],
+  "eta": 40.0,
+  "lead": 5,
+  "policy_config": "pi05_board_insertion_tactile",
+  "refresh_every": 5
+ },
+ "shrink": {
+  "bytes": 4096,
+  "target": 8
+ },
+ "written": "2026-11-17 04:08:12",
+ "written_by": "scripts/forceguide/client_server_check.py (forceguide repo)"
+}
