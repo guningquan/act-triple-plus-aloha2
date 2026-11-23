@@ -154,9 +154,15 @@ class ChunkPlan:
     sent after m commanded steps is applied when the main thread reads it: by then ``cursor`` (rows commanded so far)
     is m + d, and rows [cursor, n_exec) become plan + (corrected - plan), optionally clipped per element. Each reply
     REPLACES the previous correction (TacPAC: corrections are relative to the original plan, never cumulative), and
-    rows before the cursor - what the arms were already told - are never rewritten."""
+    rows before the cursor - what the arms were already told - are never rewritten.
 
-    def __init__(self, plan_id, actions, n_exec, max_delta=0.0, max_grip_delta=0.0):
+    ``blend`` N > 1 (--refine-blend): the new correction does not replace the scheduled one at once but is reached
+    over N rows, correction(start + i) = old + min(1, (i + 1) / N) * (new - old), where old is the correction
+    currently scheduled on those rows (possibly mid-ramp). Successive replies that disagree then move each commanded
+    row by at most 1/N of their difference instead of jumping (N = 1: the plain replace). Both old and new respect
+    the caps, so every blended row does too, and once the ramp is done the rows are again plan + the new correction."""
+
+    def __init__(self, plan_id, actions, n_exec, max_delta=0.0, max_grip_delta=0.0, blend=1):
         plan = np.array(actions, dtype=np.float64)
         if plan.ndim != 2 or plan.shape[1] < 14:
             raise ValueError("plan must be (H, >= 14), got {}".format(plan.shape))
@@ -168,6 +174,9 @@ class ChunkPlan:
         self.n_exec = min(int(n_exec), plan.shape[0])
         self.max_delta = float(max_delta or 0.0)
         self.max_grip_delta = float(max_grip_delta or 0.0)
+        self.blend = 1 if blend is None else int(blend)
+        if self.blend < 1:
+            raise ValueError("blend must be >= 1, got {}".format(blend))
         self.cursor = 0
         self.last_m = -1
         self.n_applied = 0
@@ -209,7 +218,12 @@ class ChunkPlan:
                 part = delta[:, dims]
                 clipped += int((np.abs(part) > cap).sum())
                 delta[:, dims] = np.clip(part, -cap, cap)
-        self.rows[start:self.n_exec] = self.plan[start:self.n_exec] + delta
+        if self.blend > 1:                              # ramp from the scheduled correction to the new one
+            old = self.rows[start:self.n_exec] - self.plan[start:self.n_exec]
+            w = np.minimum(1.0, np.arange(1, len(delta) + 1, dtype=np.float64) / self.blend)[:, None]
+            self.rows[start:self.n_exec] = self.plan[start:self.n_exec] + old + w * (delta - old)
+        else:
+            self.rows[start:self.n_exec] = self.plan[start:self.n_exec] + delta
         self.n_applied += 1
         jump = float(np.abs(self.rows[start, arm] - self.rows[start - 1, arm]).max()) if start > 0 else 0.0
         return {"d": int(d), "start": int(start), "n_written": int(self.n_exec - start),

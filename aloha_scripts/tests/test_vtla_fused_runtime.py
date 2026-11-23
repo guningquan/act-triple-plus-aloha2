@@ -245,7 +245,7 @@ def make_args(fused, **over):
                            action_horizon=50, max_episode_steps=60, gripper_moving_time=None, max_stream_age=0.5,
                            codec="png", probe_every=0, probe_codec="png", takeover_after=0, takeover_window=None,
                            refine=False, refine_codec="png", refine_timeout=2.0, refine_every=1, refine_max_delta=0.0,
-                           refine_max_grip_delta=0.0, refine_stop=None)
+                           refine_max_grip_delta=0.0, refine_stop=None, refine_blend=1)
     vars(a).update(over)
     return fused.resolve_args(a)
 
@@ -432,6 +432,48 @@ def test_chunkplan_caps_arms_and_grippers_separately():
         json.dumps(out)
 
 
+def test_chunkplan_blend_ramps_from_the_scheduled_correction():
+    plan = np.zeros((50, 14))
+    cp = ChunkPlan(0, plan, 50, blend=4)
+    up = plan.copy()
+    up[:, 0] += 0.04
+    cp.apply(0, 0, up)                                   # from no correction to +0.04 over 4 rows
+    np.testing.assert_allclose(cp.rows[:6, 0], [0.01, 0.02, 0.03, 0.04, 0.04, 0.04])
+    np.testing.assert_allclose(cp.rows[:, 1:], 0.0)      # other joints: plan + 0
+    for h in range(2):
+        cp.take(h)
+    down = plan.copy()
+    down[:, 0] -= 0.04
+    cp.apply(0, 2, down)                                 # mid-ramp (row 2 was 0.03): ramp from there to -0.04
+    np.testing.assert_allclose(cp.rows[:2, 0], [0.01, 0.02])                  # commanded rows never rewritten
+    # old (scheduled) on rows 2.. = 0.03, 0.04, 0.04, ...; new = -0.04; weights 1/4, 2/4, 3/4, 1
+    np.testing.assert_allclose(cp.rows[2:7, 0], [0.0125, 0.0, -0.02, -0.04, -0.04])
+    steps = np.abs(np.diff(cp.rows[:, 0]))
+    assert steps.max() <= 0.08 / 4 + 1e-12              # each row moves at most 1/N of the disagreement
+    np.testing.assert_allclose(cp.rows[6:, 0], -0.04)    # ramp done: plan + the newest correction
+
+
+def test_chunkplan_blend_respects_the_caps_and_one_is_replace():
+    plan = make_plan()
+    corrected = plan.copy()
+    corrected[:, 0] += 0.3
+    corrected[:, 13] -= 0.5
+    a = ChunkPlan(0, plan, 50, max_delta=0.05, max_grip_delta=0.2, blend=1)
+    b = ChunkPlan(0, plan, 50, max_delta=0.05, max_grip_delta=0.2)
+    c = ChunkPlan(0, plan, 50, max_delta=0.05, max_grip_delta=0.2, blend=5)
+    for cp in (a, b, c):
+        cp.take(0)
+    ia, ib = a.apply(0, 1, corrected), b.apply(0, 1, corrected)
+    np.testing.assert_array_equal(a.rows, b.rows)        # blend=1 is the plain replace
+    assert ia == ib
+    c.apply(0, 1, corrected)
+    assert np.abs(c.rows[:, 0] - plan[:, 0]).max() <= 0.05 + 1e-12
+    assert np.abs(c.rows[:, 13] - plan[:, 13]).max() <= 0.2 + 1e-12
+    np.testing.assert_allclose(c.rows[1:6, 0] - plan[1:6, 0], [0.01, 0.02, 0.03, 0.04, 0.05])
+    with pytest.raises(ValueError):
+        ChunkPlan(0, plan, 50, blend=0)
+
+
 class RefineProbeClient:
     def __init__(self, fresh_at=(), stale_at=(), fail=False):
         self.calls = []
@@ -559,7 +601,8 @@ class DeferredThread:
                 t.run()
 
 
-def run_refine(fused, client, args, monkeypatch, thread_factory=SyncThread, on_sleep=None, env=None, clock=None):
+def run_refine(fused, client, args, monkeypatch, thread_factory=SyncThread, on_sleep=None, env=None, clock=None,
+               keyboard=None):
     monkeypatch.setattr(fused, "AsyncRefine",
                         lambda c, codec, timeout_s, **kw: AsyncRefine(c, codec, timeout_s, thread_factory=thread_factory,
                                                                        **kw))
@@ -573,11 +616,40 @@ def run_refine(fused, client, args, monkeypatch, thread_factory=SyncThread, on_s
         if on_sleep is not None:
             on_sleep()
 
-    outcome = fused.run_episode(client, env, streams, sources, args, FakeKeyboard(), log.append,
+    outcome = fused.run_episode(client, env, streams, sources, args, keyboard or FakeKeyboard(), log.append,
                                 clock=lambda: clock.t, sleep=sleep)
     for record in log:
         json.dumps(record)                              # EpisodeLog writes every record as JSON
     return outcome, env, log
+
+
+class KeysAtPolls:
+    """RIGHT on the given poll() calls (1-based); run_episode polls once per chunk start and once per step."""
+
+    def __init__(self, calls):
+        self.enabled, self.calls, self.n = True, set(calls), 0
+
+    def drain(self):
+        pass
+
+    def poll(self):
+        self.n += 1
+        return ["right"] if self.n in self.calls else []
+
+
+@pytest.mark.parametrize("refine", [False, True])
+def test_right_arrow_finishes_the_episode_after_the_holdoff(fused, monkeypatch, refine):
+    # poll 1 = chunk start at step 0 (t = 0: inside the 1 s hold-off, dropped); polls 2-51 = steps 0-49; poll 52 =
+    # chunk start at step 50; poll 80 = step 77 (t = 1.54 s at 50 fps): the episode ends before step 77 is commanded
+    args = make_args(fused, max_episode_steps=200, refine=refine)
+    keyboard = KeysAtPolls({1, 80})
+    if refine:
+        outcome, env, log = run_refine(fused, RefineClient(), args, monkeypatch, keyboard=keyboard)
+    else:
+        outcome, env, streams, log = run(fused, FakeClient(), args, keyboard=keyboard)
+    assert outcome == "finish"
+    assert log[-1]["event"] == "end" and log[-1]["outcome"] == "finish" and log[-1]["steps"] == 77
+    assert len(env.puppet_bot_left.arm.goals) == 77
 
 
 def test_refine_off_never_prepares(fused):
@@ -615,6 +687,33 @@ def test_refine_corrections_land_on_the_next_step(fused, monkeypatch):
     end = log[-1]
     assert end["event"] == "end" and end["refines"] == 46 and end["refine_applied"] == 46
     assert end["refine_errors"] == 0 and end["d_mean"] == 0 and end["d_max"] == 0 and end["overruns"] == 0
+
+
+class DisagreeingRefineClient(RefineClient):
+    """Successive replies disagree: joint 0 corrected by +0.02 for odd m, -0.02 for even m (the real-robot jitter)."""
+
+    def refine(self, plan_id, m, *a, **kw):
+        r = super().refine(plan_id, m, *a, **kw)
+        if r["actions"] is not None:
+            r["actions"][:, 0] = self.plans[plan_id][:, 0] + (0.02 if m % 2 else -0.02)
+        return r
+
+
+def test_refine_blend_smooths_the_commanded_rows(fused, monkeypatch):
+    # every step gets a reply (d = 0): replace -> the commanded joint 0 flips by 0.04 at every step; blend 5 -> each
+    # row moves only a fraction of the disagreement
+    steps = {}
+    for blend in (1, 5):
+        args = make_args(fused, refine=True, refine_stop=3, max_episode_steps=50, refine_blend=blend)
+        outcome, env, log = run_refine(fused, DisagreeingRefineClient(), args, monkeypatch)
+        assert outcome == "done"
+        goals = np.array(env.puppet_bot_left.arm.goals)
+        steps[blend] = np.abs(np.diff(goals[:, 0])).max()
+        assert np.abs(goals[:, 0] - 0.1).max() <= 0.02 + 1e-12          # never beyond the corrections themselves
+    assert steps[1] == pytest.approx(0.04)
+    assert steps[5] < 0.5 * steps[1]
+    with pytest.raises(SystemExit):
+        make_args(fused, refine=True, refine_blend=0)
 
 
 def test_refine_adaptive_stop(fused, monkeypatch):

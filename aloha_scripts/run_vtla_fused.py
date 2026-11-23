@@ -21,6 +21,9 @@ Differences from run_vtla_policy.py (its robot helpers are imported unchanged; t
     each probe also sends the frame --hist steps earlier (Direction 3; the first frame while fewer steps passed);
   * --probe-every N > 0: Direction 2 C-fresh probes run in a background thread every N steps (the robot never waits
     for them); a "fresh" reply ends the chunk at the next step and the next predict starts from the live observation;
+  * keys during an episode: RIGHT = finish it now, without waiting for --max_episode_steps (it counts as done; ignored
+    in the episode's first FINISH_HOLDOFF_S so the held start key cannot end it), LEFT / r = abort and redo the round,
+    ESC / q = stop;
   * --takeover-after M > 0: M "fresh" events within --takeover-window steps -> the arms hold and the operator decides
     (RIGHT = resume the policy, LEFT / r = abort this round, ESC = quit); probes only;
   * --refine (default off; replaces --probe-every): each chunk starts with ``prepare`` (a predict that also builds the
@@ -28,8 +31,9 @@ Differences from run_vtla_policy.py (its robot helpers are imported unchanged; t
     far, the live touch, the current state; at most one in flight, none in the last --refine-stop steps). A reply for
     "m steps executed" is written back from the first row not yet commanded (m + d, d = steps executed while it was in
     flight) as ORIGINAL plan + correction (corrections never accumulate, commanded rows never change; optional
-    per-element caps --refine-max-delta / --refine-max-grip-delta). The same reply carries the per-pad C-fresh
-    decision: "fresh" ends the chunk at the next step (no operator prompt on this path);
+    per-element caps --refine-max-delta / --refine-max-grip-delta; --refine-blend N reaches each new correction over
+    N steps instead of switching at once, so disagreeing replies do not jerk the arms). The same reply carries the
+    per-pad C-fresh decision: "fresh" ends the chunk at the next step (no operator prompt on this path);
   * --data is REQUIRED: the recorder FORMAT of the checkpoint's training data, which fixes two things the model was
     trained with (--fps / --state-gripper override them):
         hdf5   the ALOHA HDF5 recorders (this repo's record_episodes_aloha2.py and hil_rollout.py --format hdf5;
@@ -72,6 +76,7 @@ from vtla_zmq_client import MODEL_TACTILE_SIZE, VtlaZmqClient
 
 HIST_SECONDS = 0.16   # the N0-VTLA real configs' default history span (config.py _HIST_SECONDS)
 REFINE_STOP_SECONDS = 0.15   # --refine-stop before any d was measured: no new refine this close to the chunk end
+FINISH_HOLDOFF_S = 1.0   # RIGHT is ignored this long after an episode starts (a held start key auto-repeats)
 # the training data's recorder -> frame rate and gripper-state convention (module docstring, --data)
 DATA_PRESETS = {
     "hdf5": {"fps": 50.0, "state_gripper": "finger"},
@@ -127,6 +132,10 @@ def build_arg_parser():
                    help="cap on |corrected - plan| per arm joint, rad (0 = only the server's bound)")
     p.add_argument("--refine-max-grip-delta", "--refine_max_grip_delta", dest="refine_max_grip_delta", type=float,
                    default=0.0, help="cap on |corrected - plan| per gripper action (0 = only the server's bound)")
+    p.add_argument("--refine-blend", "--refine_blend", dest="refine_blend", type=int, default=1,
+                   help="reach each new correction over N steps instead of replacing the scheduled one at once "
+                   "(1 = replace at once; e.g. 5 at 50 Hz, about one refine interval): removes the jumps where "
+                   "successive replies disagree")
     p.add_argument("--refine-stop", "--refine_stop", dest="refine_stop", type=int, default=None,
                    help="no new refine in the last N steps of a chunk (default adaptive: max recent d + 1, "
                    "round(0.15 * fps) before any d was measured)")
@@ -158,6 +167,8 @@ def resolve_args(args):
             raise SystemExit("--refine-max-delta / --refine-max-grip-delta must be >= 0")
         if args.refine_stop is not None and args.refine_stop < 0:
             raise SystemExit("--refine-stop must be >= 0")
+        if getattr(args, "refine_blend", 1) < 1:
+            raise SystemExit("--refine-blend must be >= 1 (1 = replace at once)")
     return args
 
 
@@ -217,12 +228,16 @@ def command(env, row, moving_time, accel_time):
                          float(np.clip(row[JOINT_LAYOUT["right_gripper"]], 0.0, 1.0)))
 
 
-def poll(keyboard):
+def poll(keyboard, finish_ok=True):
+    """ESC / q -> 'quit'; LEFT / r -> 'reset'; RIGHT -> 'finish' (end the episode now, it counts as done), ignored
+    (dropped) while finish_ok is False, i.e. in the first FINISH_HOLDOFF_S of an episode."""
     for event in keyboard.poll():
         if event == "esc":
             return "quit"
         if event in ("left", "reset"):
             return "reset"
+        if event == "right" and finish_ok:
+            return "finish"
     return None
 
 
@@ -247,7 +262,8 @@ def request_takeover(keyboard, log, step):
 
 
 def run_episode(client, env, streams, sources, args, keyboard, log, clock=time.monotonic, sleep=time.sleep):
-    """Returns "done", "quit" or "reset" (as run_vtla_policy.run_episode)."""
+    """Returns "done" (--max_episode_steps reached), "finish" (RIGHT pressed: ended early, counts as done), "quit" or
+    "reset" (as run_vtla_policy.run_episode)."""
     dt = 1.0 / args.fps
     moving_time = args.gripper_moving_time or dt
     accel_time = min(moving_time / 2.0, dt)
@@ -325,10 +341,15 @@ def run_episode(client, env, streams, sources, args, keyboard, log, clock=time.m
              "executed_rows": np.round(cp.executed(), 4).tolist()})
 
     keyboard.drain()
+    t_start = clock()
+
+    def operator_event():
+        return poll(keyboard, finish_ok=clock() - t_start >= FINISH_HOLDOFF_S)
+
     step, chunks, fresh_events = 0, 0, 0
     outcome = "done"
     while step < args.max_episode_steps and outcome == "done":
-        ev = poll(keyboard)
+        ev = operator_event()
         if ev:
             outcome = ev
             break
@@ -350,7 +371,7 @@ def run_episode(client, env, streams, sources, args, keyboard, log, clock=time.m
             refine.start_chunk(plan_id)
             handle_refines(-1, step, apply=False)               # the previous chunk's last replies: never applied
             cp = ChunkPlan(plan_id, actions, min(args.action_horizon, len(actions)),
-                           args.refine_max_delta, args.refine_max_grip_delta)
+                           args.refine_max_delta, args.refine_max_grip_delta, blend=getattr(args, "refine_blend", 1))
             sent_before, last_sent_m = refine.sent, 0
             log({"event": "chunk", "step": step, "chunk": chunks, "rtt_ms": rtt_ms,
                  "infer_ms": client.last_infer_time_ms, "plan": plan_id,
@@ -360,7 +381,7 @@ def run_episode(client, env, streams, sources, args, keyboard, log, clock=time.m
             probe.start_chunk()
             log_probes()                                        # the previous chunk's last replies
         for h in range(min(args.action_horizon, len(actions))):
-            ev = poll(keyboard)
+            ev = operator_event()
             if ev:
                 outcome = ev
                 break
@@ -445,9 +466,9 @@ def main():
                  "must show the same k)", args.data, args.fps, args.state_gripper, args.hist)
     if args.refine:
         logging.info("refine on: codec %s, timeout %.2f s, every %d, stop %s, max delta arm %g / gripper %g (0 = "
-                     "server bound only)", args.refine_codec, args.refine_timeout, args.refine_every,
-                     "adaptive" if args.refine_stop is None else args.refine_stop, args.refine_max_delta,
-                     args.refine_max_grip_delta)
+                     "server bound only), blend %d step(s) (1 = replace at once)", args.refine_codec,
+                     args.refine_timeout, args.refine_every, "adaptive" if args.refine_stop is None else args.refine_stop,
+                     args.refine_max_delta, args.refine_max_grip_delta, args.refine_blend)
     tactile_map = {slot: getattr(args, slot) for slot in DEFAULT_TACTILE_MAP}
     sources = video_sources(args.third_camera, tactile_map)
     client = VtlaZmqClient(args.host, args.port, timeout_s=args.timeout)
@@ -477,13 +498,16 @@ def main():
                             park_puppets_on_quit()
                             return
                     time.sleep(0.02)
-                print("LEFT arrow or r = abort this round and re-home, ESC/q = stop and power down.")
+                print("RIGHT arrow = finish this episode now (counts as done; ignored in its first {:g} s), "
+                      "LEFT arrow or r = abort this round and re-home, ESC/q = stop and power down."
+                      .format(FINISH_HOLDOFF_S))
             log = EpisodeLog(args.log_dir, episode)
             try:
                 outcome = run_episode(client, env, streams, sources, args, keyboard, log)
             finally:
                 log.close()
-            logging.info("Episode %d/%d: %s (log %s).", episode + 1, args.num_episodes, outcome, log.path)
+            logging.info("Episode %d/%d: %s (log %s).", episode + 1, args.num_episodes,
+                         "finished early by the operator" if outcome == "finish" else outcome, log.path)
             if outcome == "quit":
                 park_puppets_on_quit()
                 break
