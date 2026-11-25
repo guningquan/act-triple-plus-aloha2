@@ -5,7 +5,8 @@ step really from about the same moment, and was the tactile data fresh?
     python3 aloha_scripts/check_episode_timing.py <episode.hdf5 | episode_dir | dataset_dir> [...]
 
 HDF5 episodes (record_episodes_aloha2.py, hil_rollout.py --format hdf5) are read from
-/observations/timestamps (written since 2026-11, see tactile_hdf5.py); VTLA episode directories
+/observations/timestamps (written since 2026-11, see tactile_hdf5.py; tactile_acuity's xense_* layout
+and its valid_mask padding are read too); VTLA episode directories
 (record_episodes_aloha2_vtla.py, hil_rollout.py --format vtla) from timestamps.csv. Per episode it
 prints p50 / p95 / max of
 
@@ -64,21 +65,41 @@ def metrics_hdf5(path):
         if "/observations/timestamps" not in f:
             raise ValueError("no /observations/timestamps (recorded before timestamps were saved)")
         ts = f["/observations/timestamps"]
-        local = ts["local_time"][()]
+        # tactile_acuity pads episodes to a fixed length and marks the real steps in valid_mask;
+        # the padding repeats the last step, so it is left out of every metric.
+        mask = f["/observations/valid_mask"][()].astype(bool) if "/observations/valid_mask" in f else None
+
+        def read(dataset):
+            values = dataset[()]
+            return values[mask] if mask is not None and len(values) == len(mask) else values
+
+        local = read(ts["local_time"])
         out = {}
-        control = ts["control_start"][()] if "control_start" in ts else local
+        control = read(ts["control_start"]) if "control_start" in ts else local
         out["control period"] = summarize(np.diff(control))
         if "images" in ts:
-            out["camera age"] = summarize(np.concatenate([local - ts["images"][c][()] for c in ts["images"]]))
+            out["camera age"] = summarize(np.concatenate([local - read(ts["images"][c]) for c in ts["images"]]))
         if "joints" in ts:
-            out["joint age"] = summarize(np.concatenate([local - ts["joints"][s][()] for s in ts["joints"]]))
+            out["joint age"] = summarize(np.concatenate([local - read(ts["joints"][s]) for s in ts["joints"]]))
         if "tactile" in ts:
             sensors = list(ts["tactile"])
-            out["tactile age"] = summarize(np.concatenate([ts["tactile"][s]["frame_age"][()] for s in sensors]))
-            new = np.concatenate([ts["tactile"][s]["new_frame"][()][1:] for s in sensors])
+            out["tactile age"] = summarize(np.concatenate([read(ts["tactile"][s]["frame_age"]) for s in sensors]))
+            new = np.concatenate([read(ts["tactile"][s]["new_frame"])[1:] for s in sensors])
             out["tactile new"] = summarize([new.mean()]) if new.size else None
             if len(sensors) > 1:
-                ends = np.stack([ts["tactile"][s]["read_end"][()] for s in sensors])
+                ends = np.stack([read(ts["tactile"][s]["read_end"]) for s in sensors])
+                out["tactile skew"] = summarize(ends.max(axis=0) - ends.min(axis=0))
+        elif "xense_read_end" in ts:
+            # tactile_acuity's layout: xense_read_end / xense_frame_age per sensor, same definitions
+            # (frame_age = snapshot time - the publisher's local_read_end). It stores no frame
+            # counter, so a step has a new frame when its read_end differs from the previous step's.
+            sensors = list(ts["xense_read_end"])
+            ends = np.stack([read(ts["xense_read_end"][s]) for s in sensors])
+            if "xense_frame_age" in ts:
+                out["tactile age"] = summarize(np.concatenate([read(ts["xense_frame_age"][s]) for s in sensors]))
+            new = (np.diff(ends, axis=1) != 0).ravel()
+            out["tactile new"] = summarize([new.mean()]) if new.size else None
+            if len(sensors) > 1:
                 out["tactile skew"] = summarize(ends.max(axis=0) - ends.min(axis=0))
         steps = len(local)
     return steps, out
