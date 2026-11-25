@@ -14,39 +14,6 @@ else:
 
 TASK_CONFIGS = {
 
-    'zip_tie_data_collection': {
-        'dataset_dir': DATA_DIR + '/zip_tie_random',
-        'episode_len': 900,
-        'camera_names': ['cam_high',
-                         'cam_low',
-                         'cam_left_wrist',
-                         'cam_right_wrist',
-                         'gel'
-                         ]
-    },
-
-    'zip_tie': {
-        'dataset_dir': DATA_DIR + '/zip_tie_random',
-        'episode_len': 900,
-        'camera_names': ['cam_high',
-                         # 'cam_low',
-                         'cam_left_wrist',
-                         'cam_right_wrist',
-                         'gel'
-                         ]
-    },
-
-    'zip_tie_normals': {
-        'dataset_dir': DATA_DIR + '/zip_tie_random',
-        'episode_len': 900,
-        'camera_names': ['cam_high',
-                         # 'cam_low',
-                         'cam_left_wrist',
-                         'cam_right_wrist',
-                         # 'gel'
-                         ]
-    },
-
     'zip_tie_cotrain': {
         'dataset_dir': [
             DATA_DIR + '/zip_tie_random',
@@ -201,7 +168,7 @@ TASK_CONFIGS = {
     },
 
     'picking_w_cover': {
-    'dataset_dir': DATA_DIR + '/picking_w_cover',
+    'dataset_dir': DATA_DIR + '/picking_w_cover_2/ringo',
     'episode_len': 4000,
     'camera_names': ['cam_high',
                         'cam_low',
@@ -220,6 +187,33 @@ TASK_CONFIGS = {
                         ]
     },
 
+    'not_picking_w_cover': {
+    'dataset_dir': DATA_DIR + '/not_picking_w_cover',
+    'episode_len': 4000,
+    'camera_names': ['cam_high',
+                        'cam_low',
+                        'cam_left_wrist',
+                        'cam_right_wrist',
+                        ]
+    },
+
+    'key_insertion': {
+    'dataset_dir': DATA_DIR + '/key_insertion',
+    'episode_len': 4000,          # 最长 32 s，按右方向键可以提前结束
+    'camera_names': ['cam_high', 'cam_low', 'cam_left_wrist', 'cam_right_wrist'],
+    'tactile_sensors': ['left_gripper_outer', 'left_gripper_inner',
+                        'right_gripper_outer', 'right_gripper_inner'],
+    'tactile_outputs': ['rectify', 'force'],
+    },
+
+    'key_insertion_check': {          # 只录 1-2 条，多录 depth，用来验证离线重算 depth
+    'dataset_dir': DATA_DIR + '/key_insertion_check',
+    'episode_len': 4000,              # depth 很占内存，上限设为 24 s
+    'camera_names': ['cam_high', 'cam_low', 'cam_left_wrist', 'cam_right_wrist'],
+    'tactile_sensors': ['left_gripper_outer', 'left_gripper_inner',
+                        'right_gripper_outer', 'right_gripper_inner'],
+    'tactile_outputs': ['rectify', 'force', 'depth'],
+    },
 }
 
 ### ALOHA fixed constants
