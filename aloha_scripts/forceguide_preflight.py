@@ -83,6 +83,9 @@ def build_parser():
     parser.add_argument("--calibrate", action="store_true", help="Re-zero the sensors (/tactile/calibrate) first")
     parser.add_argument("--no_robot", action="store_true", help="Tactile checks only (no homing, cameras, gripper)")
     parser.add_argument("--no_home", action="store_true", help="Do not home the followers first")
+    parser.add_argument("--no_sleep", action="store_true",
+                        help="Leave the followers homed with torque on at the end (default: grippers open, followers "
+                             "to the sleep pose, torque off, as run_forceguide_policy.py does)")
     return parser
 
 
@@ -440,51 +443,62 @@ def main(argv=None):
             reset_pose = list(((info.raw if info else {}) or {}).get("reset_pose") or START_ARM_POSE)[:6]
             home_followers((env.puppet_bot_left, env.puppet_bot_right), reset_pose, move_arms, move_grippers,
                            (PUPPET_LEFT_GRIPPER_JOINT_OPEN, PUPPET_RIGHT_GRIPPER_JOINT_OPEN), DT)
-    sensors = {key: sensor_for_key(key, overrides) for key in keys}
-    if args.calibrate:
-        tactile_stream.calibrate_sensors(sorted(set(sensors.values())))
-    config = tactile_stream.RuntimeConfig.get().wait(3.0)
-    report["runtime_config"] = None if not config else {key: config.get(key) for key in (
-        "serials", "calibrated", "calibrated_at", "sdk_version", "settings")}
-    expected_serials = dict((reference.get("meta") or {}).get("serials") or {})
-    expected_serials.update(dict(value.split("=", 1) for value in args.expected_serial))
-    report["serials"] = serial_check((config or {}).get("serials"), expected_serials)
-    live, codecs, seqs = capture_live_tactile(sorted(set(sensors.values())), args.frames, args.tactile_wait)
-    report["codecs"], report["seqs"] = codecs, seqs
-    report["publisher_ok"] = all(codec in (None, "raw") for codec in codecs.values())
-    live_native = {key: live[sensor] for key, sensor in sensors.items()}
-    report["tactile"] = run_tactile_checks(live_native, reference, spec, keys, args.min_margin, args.colour_margin)
-    checks = [report["tactile"]["ok"], report["publisher_ok"], report["serials"]["ok"] is not False]
-    if env is not None:
-        images = env.get_images()
-        report["cameras"] = run_camera_checks(images, reference, image_bgr, args.colour_margin)
-        checks.append(report["cameras"]["ok"])
-        from hil_devices import FollowerCommander
+    final_lines = []  # printed after the followers are asleep, so the robot's shutdown output cannot bury them
+    try:
+        sensors = {key: sensor_for_key(key, overrides) for key in keys}
+        if args.calibrate:
+            tactile_stream.calibrate_sensors(sorted(set(sensors.values())))
+        config = tactile_stream.RuntimeConfig.get().wait(3.0)
+        report["runtime_config"] = None if not config else {key: config.get(key) for key in (
+            "serials", "calibrated", "calibrated_at", "sdk_version", "settings")}
+        expected_serials = dict((reference.get("meta") or {}).get("serials") or {})
+        expected_serials.update(dict(value.split("=", 1) for value in args.expected_serial))
+        report["serials"] = serial_check((config or {}).get("serials"), expected_serials)
+        live, codecs, seqs = capture_live_tactile(sorted(set(sensors.values())), args.frames, args.tactile_wait)
+        report["codecs"], report["seqs"] = codecs, seqs
+        report["publisher_ok"] = all(codec in (None, "raw") for codec in codecs.values())
+        live_native = {key: live[sensor] for key, sensor in sensors.items()}
+        report["tactile"] = run_tactile_checks(live_native, reference, spec, keys, args.min_margin, args.colour_margin)
+        checks = [report["tactile"]["ok"], report["publisher_ok"], report["serials"]["ok"] is not False]
+        if env is not None:
+            images = env.get_images()
+            report["cameras"] = run_camera_checks(images, reference, image_bgr, args.colour_margin)
+            checks.append(report["cameras"]["ok"])
+            from hil_devices import FollowerCommander
 
-        measured = FollowerCommander((env.puppet_bot_left, env.puppet_bot_right), max_joint_step=None).measured()
-        report["gripper"] = gripper_home_check(measured, arm, args.gripper_tolerance)
-        report["gripper"]["applies"] = state_gripper == "vtla"
-        if state_gripper == "vtla":
-            checks.append(report["gripper"]["ok"])
-    report["ok"] = all(checks)
-    text = json.dumps(to_jsonable(report), indent=2)
-    if args.out:
-        with open(args.out, "w") as handle:
-            handle.write(text)
-    for key, item in report["tactile"]["identity"].items():
-        colour = report["tactile"]["colour"].get(key, {}).get("verdict")
-        print("{:45s} best match {:45s} corr {:.3f} margin {:.3f} colour {}".format(
-            key, str(item["best"]), item["scores"].get(item["best"], float("nan")), item["margin"], colour))
-    parity = report["tactile"].get("prepared_parity") or {}
-    if parity.get("max_abs_diff"):
-        print("client preparation vs the npz's prepared frames (same geometry): max |diff| {}".format(
-            parity["max_abs_diff"]))
-    if "gripper" in report:
-        print("gripper state at home: {}".format(report["gripper"]["grippers"]))
-    print("PASS" if report["ok"] else "FAIL", "(report: {})".format(args.out or "stdout"))
-    if not args.out:
-        print(text)
-    return 0 if report["ok"] else 1
+            measured = FollowerCommander((env.puppet_bot_left, env.puppet_bot_right), max_joint_step=None).measured()
+            report["gripper"] = gripper_home_check(measured, arm, args.gripper_tolerance)
+            report["gripper"]["applies"] = state_gripper == "vtla"
+            if state_gripper == "vtla":
+                checks.append(report["gripper"]["ok"])
+        report["ok"] = all(checks)
+        text = json.dumps(to_jsonable(report), indent=2)
+        if args.out:
+            with open(args.out, "w") as handle:
+                handle.write(text)
+        if not args.out:
+            final_lines.append(text)
+        for key, item in report["tactile"]["identity"].items():
+            colour = report["tactile"]["colour"].get(key, {}).get("verdict")
+            final_lines.append("{:45s} best match {:45s} corr {:.3f} margin {:.3f} colour {}".format(
+                key, str(item["best"]), item["scores"].get(item["best"], float("nan")), item["margin"], colour))
+        parity = report["tactile"].get("prepared_parity") or {}
+        if parity.get("max_abs_diff"):
+            final_lines.append("client preparation vs the npz's prepared frames (same geometry): max |diff| {}".format(
+                parity["max_abs_diff"]))
+        if "gripper" in report:
+            final_lines.append("gripper state at home: {}".format(report["gripper"]["grippers"]))
+        final_lines.append("{} (report: {})".format("PASS" if report["ok"] else "FAIL", args.out or "stdout"))
+        return 0 if report["ok"] else 1
+    finally:
+        if env is not None and not args.no_sleep:  # never leave the followers up with torque on
+            from sleep_plus import shut_down_puppet_robots
+
+            print("Opening the grippers and moving the followers to the sleep pose...")
+            shut_down_puppet_robots()
+            print("Followers are at the sleep pose with torque off.")
+        for line in final_lines:
+            print(line)
 
 
 if __name__ == "__main__":

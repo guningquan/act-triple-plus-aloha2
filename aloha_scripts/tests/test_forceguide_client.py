@@ -2097,6 +2097,60 @@ def test_an_infrastructure_stop_names_its_fault_before_the_operator_answers(monk
     assert stopped[0] < asked[0] < told
 
 
+def test_unblinded_console_names_the_condition_and_the_full_failure_reason(monkeypatch, tmp_path):
+    """--unblinded (2026-11-24, the operator does not want blinding): the start line and the "stopped" / re-run lines
+    name the trial's condition and the full reason; episodes.jsonl is the same as in a blinded run."""
+    server = FakeSessionServer(make_metadata(horizon=20, policy_hz=50.0))
+    failed = []
+    original = server._handle
+
+    def flaky(message):  # the first attempt's second plan fails, as in the blinded test above
+        if message.get("forceguide", "plan") == "plan" and message.get("tactile_step", 0) > 0 and not failed:
+            failed.append(message["tactile_step"])
+            raise RuntimeError("XLA error")
+        return original(message)
+
+    server._handle = flaky
+    events = []
+    monkeypatch.setattr(runner, "print", lambda *a, **k: events.append(" ".join(str(x) for x in a)), raising=False)
+    monkeypatch.setattr(runner, "wait_for_start", lambda keyboard: True)
+    answers = iter(["n", "align", "jam", "", "y", "done", ""])
+    _fake_hardware(monkeypatch, server, iter([ScriptedKeyboard() for _ in range(10)]), [])
+    log_dir = str(tmp_path / "logs")
+    assert runner.main(["--host", "h", "--condition", "p0", "--num_episodes", "1", "--log_dir", log_dir,
+                        "--max_episode_steps", "30", "--no_warmup", "--unblinded"],
+                       input_fn=lambda prompt: next(answers)) == 0
+    episodes = _episodes(log_dir)
+    assert [e["status"] for e in episodes] == ["infrastructure_failure", "success"] and len(failed) == 1
+    starts = [line for line in events if line.startswith("Trial r0000 [p0] (attempt")]
+    assert len(starts) == 2, events
+    stopped = [line for line in events if line.startswith("Trial r0000 stopped")]
+    assert stopped == ["Trial r0000 stopped ({}).".format(episodes[0]["reason"])] and "XLA error" in stopped[0]
+    rerun = [line for line in events if "it will be re-run" in line]
+    assert len(rerun) == 1 and "XLA error" in rerun[0]
+
+
+def test_no_outcome_asks_nothing_and_a_resume_skips_the_trials_that_ran(monkeypatch, tmp_path):
+    """--no_outcome (2026-11-24, the operator keeps their own record): no outcome prompt, every attempt that ran is
+    logged as unlabelled and counts as done, so the same command run again starts nothing new."""
+    server = FakeSessionServer(make_metadata(horizon=20, policy_hz=50.0))
+    monkeypatch.setattr(runner, "wait_for_start", lambda keyboard: True)
+
+    def no_prompt(prompt):
+        raise AssertionError("asked: {}".format(prompt))
+
+    log_dir = str(tmp_path / "logs")
+    argv = ["--host", "h", "--condition", "p0", "--num_episodes", "2", "--log_dir", log_dir,
+            "--max_episode_steps", "30", "--no_warmup", "--no_outcome"]
+    _fake_hardware(monkeypatch, server, iter([ScriptedKeyboard() for _ in range(10)]), [])
+    assert runner.main(argv, input_fn=no_prompt) == 0
+    episodes = _episodes(log_dir)
+    assert [(e["trial_id"], e["status"]) for e in episodes] == [("r0000", "unlabelled"), ("r0001", "unlabelled")]
+    _fake_hardware(monkeypatch, server, iter([ScriptedKeyboard() for _ in range(10)]), [])
+    assert runner.main(argv, input_fn=no_prompt) == 0
+    assert len(_episodes(log_dir)) == 2
+
+
 def test_runs_without_a_schedule_file_carry_a_run_label_in_their_trial_identity(monkeypatch, tmp_path, capsys):
     """Contract C9 (review N3): a --condition run is labelled (--run_label, default: its log dir's name); the label
     is inside schedule_sha256 and in every episodes.jsonl row and sessions.jsonl record. Two runs in different log
@@ -2439,7 +2493,7 @@ def test_preflight_prepares_the_reference_with_the_condition_spec(tmp_path):
     assert all(stale[key]["own"] < 0.5 for key in KEYS)
 
 
-def test_preflight_main_with_faked_sensors_and_robot(monkeypatch, tmp_path):
+def test_preflight_main_with_faked_sensors_and_robot(monkeypatch, tmp_path, capsys):
     reference_path = _reference(tmp_path)
     streams = {sensor: FakeStream(time.time, sensor_image(sensor)) for sensor in fc.KNOWN_SENSORS}
 
@@ -2459,8 +2513,16 @@ def test_preflight_main_with_faked_sensors_and_robot(monkeypatch, tmp_path):
                         types.SimpleNamespace(make_real_env=lambda init_node, setup_robots: env))
     monkeypatch.setitem(sys.modules, "robot_utils", types.SimpleNamespace(
         move_arms=lambda *a, **k: None, move_grippers=lambda *a, **k: None))
+    shutdowns = []  # 2026-11-24: the check ends with the followers at the sleep pose, torque off (unless --no_sleep)
+    monkeypatch.setitem(sys.modules, "sleep_plus",
+                        types.SimpleNamespace(shut_down_puppet_robots=lambda: shutdowns.append(1)))
     out = str(tmp_path / "report.json")
     assert forceguide_preflight.main(["--reference", reference_path, "--out", out, "--frames", "2"]) == 0
+    assert shutdowns == [1]
+    console = capsys.readouterr().out  # the result comes after the robot's shutdown output, not buried by it
+    assert console.index("Followers are at the sleep pose") < console.index("best match") < console.index("PASS")
+    assert forceguide_preflight.main(["--reference", reference_path, "--out", out, "--frames", "1", "--no_sleep"]) == 0
+    assert shutdowns == [1]
     with open(out) as handle:
         report = json.load(handle)
     assert report["ok"] and report["gripper"]["grippers"] == pytest.approx([1.0, 1.0])

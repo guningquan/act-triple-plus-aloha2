@@ -116,6 +116,14 @@ def build_parser():
                         help="Without --schedule: label of this run, part of its trial identity and of every "
                              "episodes.jsonl row (letters, digits, ._+-; default: the log dir's name). The analysis "
                              "reports the run as <condition>@<label>; use a label once per run analysed together")
+    trials.add_argument("--unblinded", action="store_true",
+                        help="No operator blinding: the console names each trial's condition, shows the full reason of "
+                             "an infrastructure failure and keeps log records during a trial (episodes.jsonl and "
+                             "client.log are the same either way)")
+    trials.add_argument("--no_outcome", action="store_true",
+                        help="Do not ask for an outcome after a trial (the operator keeps their own record): an "
+                             "attempt that ran is logged as unlabelled and counts as done, also when the run is "
+                             "resumed; infrastructure failures are still re-run")
     trials.add_argument("--seed", type=int, default=0, help="Noise seed: default_rng([seed, noise_id, plan_index]); "
                         "a resumed campaign keeps its seed")
     trials.add_argument("--max_episode_steps", type=int, default=3000, help="Control ticks per trial (50 Hz)")
@@ -1199,6 +1207,7 @@ def _main(argv, input_fn, logs):
                           "plan_pause_source": pause_source, "preflight_check": preflight_check}
     session.client_log = client_log
     keyboard = [None]
+    final_lines = []  # printed after the followers are asleep, so the robot's shutdown output cannot bury them
     try:
         keyboard[0] = KeyboardControl()
         codecs = wait_for_tactile(rig, args.tactile_wait, args.force) if campaign.sensors else {}
@@ -1214,10 +1223,10 @@ def _main(argv, input_fn, logs):
             report.update(session=client.session, codecs=codecs, written=datetime.datetime.now().isoformat())
             with open(report_path, "w") as handle:
                 json.dump(to_jsonable(report), handle, indent=2)
-            print(json.dumps(to_jsonable({key: report.get(key) for key in (
+            final_lines.append(json.dumps(to_jsonable({key: report.get(key) for key in (
                 "refresh_rtt_ms", "plan_rtt_p99_ms", "required_lead", "configured_lead", "plan_pause_s_recommended",
                 "problems", "note")}), indent=2))
-            print("Preflight report: {} ({})".format(report_path, "OK" if report["ok"] else "REFUSED"))
+            final_lines.append("Preflight report: {} ({})".format(report_path, "OK" if report["ok"] else "REFUSED"))
             return 0 if report["ok"] or args.force else 2
         return run_trials(session, rows, args, log_dir, keyboard, KeyboardControl, input_fn, home, calibrate,
                           lambda: FollowerCommander(puppets, max_joint_step=args.max_joint_step or None,
@@ -1230,8 +1239,12 @@ def _main(argv, input_fn, logs):
             keyboard[0].close()
         rig.close()
         print("Opening the grippers and moving the followers to the sleep pose...")
-        shut_down_puppet_robots()
-        print("Followers are at the sleep pose with torque off.")
+        try:
+            shut_down_puppet_robots()
+            print("Followers are at the sleep pose with torque off.")
+        finally:
+            for line in final_lines:
+                print(line)
 
 
 def run_trials(session, rows, args, log_dir, keyboard, keyboard_factory, input_fn, home, calibrate, make_follower,
@@ -1262,9 +1275,11 @@ def run_trials(session, rows, args, log_dir, keyboard, keyboard_factory, input_f
 def _run_trial_rows(session, rows, args, log_dir, keyboard, keyboard_factory, input_fn, home, calibrate,
                     make_follower, clamp_fn, plan_pause_s, preflight, codecs, episodes_path, attempts, client,
                     campaign, totals):
+    no_outcome = getattr(args, "no_outcome", False)
     for row in rows:
         previous = attempts.get(row["trial_id"], [])
-        if any(r.get("status") in FINAL_STATUSES for r in previous):
+        if any(r.get("status") in FINAL_STATUSES or (no_outcome and r.get("status") == "unlabelled")
+               for r in previous):
             continue
         attempt = len(previous)
         while True:
@@ -1276,8 +1291,9 @@ def _run_trial_rows(session, rows, args, log_dir, keyboard, keyboard_factory, in
             print("Re-homing the followers...")
             home()
             tactile_calibration = calibrate()
-            print("Trial {} (attempt {}): set initial condition {}. RIGHT = start, ESC = quit.".format(
-                row["trial_id"], attempt, row["init_condition_id"]))
+            shown = " [{}]".format(row["condition"]) if getattr(args, "unblinded", False) else ""
+            print("Trial {}{} (attempt {}): set initial condition {}. RIGHT = start, ESC = quit.".format(
+                row["trial_id"], shown, attempt, row["init_condition_id"]))
             if keyboard[0].enabled and not wait_for_start(keyboard[0]):
                 return 0
             follower = make_follower()
@@ -1285,7 +1301,8 @@ def _run_trial_rows(session, rows, args, log_dir, keyboard, keyboard_factory, in
             outcome, reason = "infrastructure", None
             executor = None
             # blinding: from the condition's setup to the end of the attempt, log records go to client.log only
-            with session.client_log.trial() if session.client_log is not None else contextlib.nullcontext():
+            blinded_log = session.client_log is not None and not getattr(args, "unblinded", False)
+            with session.client_log.trial() if blinded_log else contextlib.nullcontext():
                 ctx = session.trial(row["condition"], row["noise_id"], follower.measured, args.infer_timeout, labels)
                 started = datetime.datetime.now().isoformat()
                 t0 = time.monotonic()
@@ -1298,7 +1315,7 @@ def _run_trial_rows(session, rows, args, log_dir, keyboard, keyboard_factory, in
                         executor, follower, keyboard[0], session.capture_frame, session.rig, args.max_episode_steps,
                         session.control_dt, plan_pause_s=plan_pause_s, clock=session.clock, sleep=session.sleep,
                         ctx=ctx, camera_ages=session.camera_ages, clamp_fn=clamp_fn,
-                        show_progress=keyboard[0].enabled, label="trial {}".format(row["trial_id"]),
+                        show_progress=keyboard[0].enabled, label="trial {}{}".format(row["trial_id"], shown),
                         measured_fn=follower.measured)
                 except InfrastructureFailure as exc:  # reset failed (ServerChanged included)
                     outcome, reason = "infrastructure", "{}: {}".format(type(exc).__name__, exc)
@@ -1315,14 +1332,19 @@ def _run_trial_rows(session, rows, args, log_dir, keyboard, keyboard_factory, in
                 # Intention to treat (exp 1): the operator enters the outcome of every attempt that ran - protocol-
                 # flagged ones and infrastructure failures included - before learning whether it counts.
                 if outcome == "infrastructure":  # the reason as the operator may see it (console_reason)
-                    print("Trial {} stopped ({}).".format(row["trial_id"], console_reason(reason)))
+                    print("Trial {} stopped ({}).".format(
+                        row["trial_id"], reason if getattr(args, "unblinded", False) and reason else console_reason(reason)))
                 else:
                     print("Trial {} ended ({}).".format(row["trial_id"], outcome if reason is None else reason))
-                keyboard[0].close()
-                try:
-                    operator = ask_outcome(input_fn)
-                finally:
-                    keyboard[0] = keyboard_factory()
+                if no_outcome:  # the operator keeps their own record (--no_outcome)
+                    operator = {"labelled": False, "success": None, "rerun": False, "stage": None,
+                                "failure_type": None, "notes": None}
+                else:
+                    keyboard[0].close()
+                    try:
+                        operator = ask_outcome(input_fn)
+                    finally:
+                        keyboard[0] = keyboard_factory()
             if status == "labelled":
                 if not operator["labelled"]:
                     status = "unlabelled"
@@ -1334,7 +1356,7 @@ def _run_trial_rows(session, rows, args, log_dir, keyboard, keyboard_factory, in
                 # a reason naming refreshes (or a server traceback) would tell the operator the condition's mode;
                 # an attempt that ran to its end (reason "key" or None) failed on its refresh slots
                 print("Trial {}: infrastructure failure ({}); it will be re-run.".format(
-                    row["trial_id"], console_reason(reason, outcome)))
+                    row["trial_id"], reason if getattr(args, "unblinded", False) and reason else console_reason(reason, outcome)))
             write_trial(session, row, attempt, status, outcome, reason, operator, summary, ctx, started,
                         time.monotonic() - t0, plan_pause_s, tactile_calibration, preflight, log_dir, episodes_path,
                         codecs=codecs, flags=flags)
