@@ -563,22 +563,22 @@ openpiは元のhdf5を直接読まず、学習にはLeRobot形式のデータセ
 
 ## 5. よく使うパラメータ（`hil_rollout.py`。`run_pi_policy.py` のパラメータは第2節と `--help` を参照）
 
-| パラメータ                                         | デフォルト | 説明                                                                                 |
-| -------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------ |
-| `--action_horizon`                               | 50         | 1回の推論で実行するステップ数                                                        |
-| `--infer_timeout`                                | 10         | 1回の推論のタイムアウト（秒）。超えると自動で一時停止                                |
-| `--align_s`                                      | 2.0        | 一時停止時にマスターアームをフォロワーに合わせる時間                                 |
-| `--release_ramp_s`                               | 0.5        | 介入時にマスターアームを柔らかくする時間。速すぎると感じたら大きくする               |
-| `--settle_s` / `--settle_timeout_s`            | 0.5 / 2.0  | マスターアームの静止判定 / 最大待機時間                                              |
-| `--absolute_takeover`                            | オフ       | クラッチを使わず、フォロワーがマスターアームの絶対位置に直接追従する                 |
-| `--correction_blend_s` / `--correction_skip_s` | 0 / 0.2    | 介入開始時の缓入（直前の指令から）/ interventionとマークしない時間                   |
-| `--max_joint_step`                               | 0.1        | フォロワーの1tickあたりの関節最大変化量（rad）。0で無効化                            |
-| `--max_stream_age`                               | 0.5        | カメラデータがこの秒数より古くなるとポリシーを一時停止                               |
+| パラメータ                                         | デフォルト | 説明                                                                                                                     |
+| -------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `--action_horizon`                               | 50         | 1回の推論で実行するステップ数                                                                                            |
+| `--infer_timeout`                                | 10         | 1回の推論のタイムアウト（秒）。超えると自動で一時停止                                                                    |
+| `--align_s`                                      | 2.0        | 一時停止時にマスターアームをフォロワーに合わせる時間                                                                     |
+| `--release_ramp_s`                               | 0.5        | 介入時にマスターアームを柔らかくする時間。速すぎると感じたら大きくする                                                   |
+| `--settle_s` / `--settle_timeout_s`            | 0.5 / 2.0  | マスターアームの静止判定 / 最大待機時間                                                                                  |
+| `--absolute_takeover`                            | オフ       | クラッチを使わず、フォロワーがマスターアームの絶対位置に直接追従する                                                     |
+| `--correction_blend_s` / `--correction_skip_s` | 0 / 0.2    | 介入開始時の缓入（直前の指令から）/ interventionとマークしない時間                                                       |
+| `--max_joint_step`                               | 0.1        | フォロワーの1tickあたりの関節最大変化量（rad）。0で無効化                                                                |
+| `--max_stream_age`                               | 0.5        | カメラデータがこの秒数より古くなるとポリシーを一時停止                                                                   |
 | `--max_tactile_age`                              | 0.2        | 触覚フレーム自体（パブリッシャーの `local_read_end` から計算したデータ年齢）がこの秒数より古くなるとポリシーを一時停止 |
-| `--no_tactile_calibration`                       | オフ       | 各エピソード開始前の触覚のゼロ点校正を行わない                                       |
-| `--tactile_jpeg_quality`                         | 90         | hdf5形式: パブリッシャーがrawで送る触覚 rectify/difference をJPEGで保存するときの品質 |
-| `--no_force_feedback`                            | オフ       | マスターグリッパーの力フィードバックを無効化                                         |
-| `--pedal_device`                                 | なし       | evdevフットペダル（`--pedal_pause KEY_A --pedal_correct KEY_B --pedal_end KEY_C`） |
+| `--no_tactile_calibration`                       | オフ       | 各エピソード開始前の触覚のゼロ点校正を行わない                                                                           |
+| `--tactile_jpeg_quality`                         | 90         | hdf5形式: パブリッシャーがrawで送る触覚 rectify/difference をJPEGで保存するときの品質                                    |
+| `--no_force_feedback`                            | オフ       | マスターグリッパーの力フィードバックを無効化                                                                             |
+| `--pedal_device`                                 | なし       | evdevフットペダル（`--pedal_pause KEY_A --pedal_correct KEY_B --pedal_end KEY_C`）                                     |
 
 全パラメータは `python3 aloha_scripts/hil_rollout.py --help` を参照してください。
 
@@ -590,8 +590,8 @@ openpiは元のhdf5を直接読まず、学習にはLeRobot形式のデータセ
 | `ModuleNotFoundError: msgpack` など                                | 環境が有効化されていない: `conda activate aloha`（システムのPythonにはこれらのパッケージは入っていません）                                                                                        |
 | `Warming up the policy server` が長く続く                          | openpiが初回推論でコンパイル中。正常な動作。`--warmup_timeout` を超えた場合のみエラーになる                                                                                                       |
 | 実行中に自動的に `Paused (inference failed / no reply ...)` になる | サーバー側でエラーまたはタイムアウト: サーバーのターミナルを確認。GPUが混んでいると推論が遅くなるので `--infer_timeout` を大きくするとよい                                                        |
-| 自動的に `Paused (stale stream ...)` になる                        | いずれかのカメラ／触覚のストリームが断流している: ターミナル1のlaunch出力、`rostopic hz /usb_cam_high/image_raw`、`rostopic hz /tactile/left_gripper_outer/raw` を確認 |
-| `/tactile/calibrate is not available` で終了する                   | 触覚launchが起動していないか、パブリッシャーが古いバージョン: `4arms_tactile_teleop.launch` を先に起動する。ゼロ点校正が当面不要なら `--no_tactile_calibration` を付ける |
+| 自動的に `Paused (stale stream ...)` になる                        | いずれかのカメラ／触覚のストリームが断流している: ターミナル1のlaunch出力、`rostopic hz /usb_cam_high/image_raw`、`rostopic hz /tactile/left_gripper_outer/raw` を確認                          |
+| `/tactile/calibrate is not available` で終了する                   | 触覚launchが起動していないか、パブリッシャーが古いバージョン: `4arms_tactile_teleop.launch` を先に起動する。ゼロ点校正が当面不要なら `--no_tactile_calibration` を付ける                        |
 | `needs a terminal (stdin is not a tty)`                            | 必ず対話的なターミナルで直接実行する必要があります。バックグラウンド実行やstdinのリダイレクトはできません                                                                                           |
 | フォロワーの動作がぎくしゃくする                                     | 各チャンクの推論ごとに一度停止します（openpiのaloha_realと同じ挙動）。推論が遅い場合はサーバーのGPUが混んでいないか確認                                                                             |
 | `follower: command jumped ... limited`                             | ポリシーの出力やマスターアームの読み取り値が1ステップで急変したため制限がかかった状態。稀に出る程度なら無視してよいが、頻発する場合は原因を調査すること                                             |

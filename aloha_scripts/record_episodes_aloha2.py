@@ -393,101 +393,65 @@ def build_haptics_config(args, robot_side):
 
 def opening_ceremony(master_bot_left, master_bot_right, puppet_bot_left, puppet_bot_right,
                      dataset_name, start_open_ratio=DEFAULT_START_OPEN_RATIO):
-    """ Move all 4 robots to a pose where it is easy to start demonstration """
-    # reboot gripper motors, and set operating modes for all motors
+    """Prepare the connected leader/follower pairs; None means an ignored arm."""
+    pairs = [("left", master_bot_left, puppet_bot_left),
+             ("right", master_bot_right, puppet_bot_right)]
+    pairs = [(side, master, puppet) for side, master, puppet in pairs if puppet is not None]
+    for side, master, puppet in pairs:
+        puppet.dxl.robot_reboot_motors("single", "gripper", True)
 
-    puppet_bot_left.dxl.robot_reboot_motors("single", "gripper", True)
-    puppet_bot_right.dxl.robot_reboot_motors("single", "gripper", True)
-
-    # puppet_bot_left.dxl.robot_set_operating_modes("group", "arm", "position")
-    # puppet_bot_left.dxl.robot_set_operating_modes("single", "gripper", "current_based_position")
-    # master_bot_left.dxl.robot_set_operating_modes("group", "arm", "position")
-    # master_bot_left.dxl.robot_set_operating_modes("single", "gripper", "position")
-    # # puppet_bot_left.dxl.robot_set_motor_registers("single", "gripper", 'current_limit', 1000) # TODO(tonyzhaozh) figure out how to set this limit
-    # puppet_bot_right.dxl.robot_set_operating_modes("group", "arm", "position")
-    # puppet_bot_right.dxl.robot_set_operating_modes("single", "gripper", "current_based_position")
-    # master_bot_right.dxl.robot_set_operating_modes("group", "arm", "position")
-    # master_bot_right.dxl.robot_set_operating_modes("single", "gripper", "position")
-    # # puppet_bot_left.dxl.robot_set_motor_registers("single", "gripper", 'current_limit', 1000) # TODO(tonyzhaozh) figure out how to set this limit
-
-    # threading
-    import threading
-    def set_operating_modes(robot, arm_mode, gripper_mode):
-        # arm_mode is always "position" at every call site below; what actually matters here is
-        # the profile TYPE. robot_set_operating_modes() defaults profile_type to "velocity" with
-        # profile_velocity=0 (i.e. no speed limit) when not told otherwise, so leaving it at that
-        # default put every arm into raw max-speed velocity-profile mode right before move_arms()
-        # below - and, since nothing later in this process ever switches it back, every later
-        # move_arms() call in this run (including the sleep/shutdown ones in sleep_plus.py) kept
-        # running unthrottled too. one_side_teleop.py avoids this by forcing time-based-profile
-        # mode via set_arm_position_time_profile() before it ever calls set_joint_positions();
-        # doing the same here is what actually fixes the "moves too fast" report, not just
-        # matching its move_time value.
+    def configure(robot, gripper_mode):
+        # Explicit time profile keeps homing and later rest moves speed-limited.
         set_arm_position_time_profile(robot, DEFAULT_PREP_ARM_MOVE_TIME, DEFAULT_PREP_ARM_ACCEL_TIME)
         robot.dxl.robot_set_operating_modes("single", "gripper", gripper_mode)
-    def configure_robots(puppet_bot_left, master_bot_left, puppet_bot_right, master_bot_right):
-        threads = [
-            threading.Thread(target=set_operating_modes, args=(puppet_bot_left, "position", "current_based_position")),
-            threading.Thread(target=set_operating_modes, args=(master_bot_left, "position", "position")),
-            threading.Thread(target=set_operating_modes, args=(puppet_bot_right, "position", "current_based_position")),
-            threading.Thread(target=set_operating_modes, args=(master_bot_right, "position", "position"))
-        ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join()
-    configure_robots(puppet_bot_left, master_bot_left, puppet_bot_right, master_bot_right)
 
-    torque_on(puppet_bot_left)
-    torque_on(master_bot_left)
-    torque_on(puppet_bot_right)
-    torque_on(master_bot_right)
+    threads = [threading.Thread(target=configure, args=(bot, mode))
+               for side, master, puppet in pairs
+               for bot, mode in ((puppet, "current_based_position"), (master, "position"))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
 
-    # move arms to starting position
-    start_arm_qpos = START_ARM_POSE[:6]
-    move_arms([master_bot_left, puppet_bot_left, master_bot_right, puppet_bot_right], [start_arm_qpos] * 4, move_time=DEFAULT_PREP_ARM_MOVE_TIME)
-    # move grippers to starting position, the same way one_side_teleop does it: each master parks
-    # at start_open_ratio (fully open by default) and each puppet at exactly what that maps to, so
-    # the two already agree and nothing jumps when teleoperation begins.
-    master_left_start = master_gripper_pose("left", start_open_ratio)
-    master_right_start = master_gripper_pose("right", start_open_ratio)
-    puppet_left_start = master_to_puppet_gripper("left", master_left_start)
-    puppet_right_start = master_to_puppet_gripper("right", master_right_start)
-    print(f"Gripper start poses (mapped): master L {master_left_start:.4f} / R {master_right_start:.4f}, "
-          f"puppet L {puppet_left_start:.4f} / R {puppet_right_start:.4f}.")
-    move_grippers(
-        [master_bot_left, puppet_bot_left, master_bot_right, puppet_bot_right],
-        [master_left_start, puppet_left_start, master_right_start, puppet_right_start],
-        move_time=0.5,
-    )
-    # move_arms() above left every puppet arm's Profile_Velocity/Acceleration registers at the
-    # slow 2.0s "walk to the start pose" duration. Teleoperation drives the puppet with per-tick
-    # RealEnv.step() -> set_joint_positions(..., moving_time=None) calls (see real_env.py), which
-    # reuse whatever moving_time is already cached - so without this, every 20ms tick would ask
-    # the servo for a fresh "reach this in 2 seconds" plan and the arm would barely creep, unable
-    # to track the master in real time. one_side_teleop.py's prep_robots() shrinks this back down
-    # to teleop cadence (DT) right after reaching the start pose for exactly this reason; do the
-    # same here, with set_trajectory_time() (a RAM register write) rather than
-    # set_arm_position_time_profile() (which rewrites the EEPROM Operating_Mode and briefly drops
-    # torque, letting the arm sag).
-    for puppet_bot in (puppet_bot_left, puppet_bot_right):
-        puppet_bot.arm.moving_time = None
-        puppet_bot.arm.accel_time = None
-        puppet_bot.arm.set_trajectory_time(moving_time=DT, accel_time=min(DT, DT / 2))
-    # Starting is now a keypress, not a gripper squeeze - the caller does that with a
-    # KeyboardControl so the same RIGHT/LEFT/ESC keys work here as in one_side_teleop.
+    bots = [bot for side, master, puppet in pairs for bot in (master, puppet)]
+    for bot in bots:
+        torque_on(bot)
+    move_arms(bots, [START_ARM_POSE[:6]] * len(bots), move_time=DEFAULT_PREP_ARM_MOVE_TIME)
+    gripper_poses = []
+    for side, master, puppet in pairs:
+        master_start = master_gripper_pose(side, start_open_ratio)
+        puppet_start = master_to_puppet_gripper(side, master_start)
+        gripper_poses.extend([master_start, puppet_start])
+        print(f"Gripper start poses ({side}): master {master_start:.4f}, puppet {puppet_start:.4f}.")
+    move_grippers(bots, gripper_poses, move_time=0.5)
+    # Homing leaves a slow trajectory time cached. Restore per-tick tracking using
+    # RAM registers only; changing operating mode here would drop torque briefly.
+    for side, master, puppet in pairs:
+        puppet.arm.moving_time = None
+        puppet.arm.accel_time = None
+        puppet.arm.set_trajectory_time(moving_time=DT, accel_time=DT / 2)
 
 
 def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_name, overwrite,
                         haptics_args=None, tactile_sensors=(), tactile_outputs=()):
     print("*"*100)
     print(f'Dataset name: {dataset_name}')
+    haptics_args = haptics_args or {}
+    ignore_left = haptics_args.get("ignore_left", False)
+    if ignore_left:
+        print("Right-arm recording: left hardware is ignored; left 7 data columns are zero padding.")
+        tactile_sensors = [name for name in tactile_sensors if "/left_" not in topic_for(name)]
     # source of data
-    master_bot_left = InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
+    master_bot_left = None if ignore_left else InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
                                               robot_name=f'master_left', init_node=True)
     master_bot_right = InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
-                                               robot_name=f'master_right', init_node=False)
-    env = make_real_env(init_node=False, setup_robots=False)
+                                               robot_name=f'master_right', init_node=ignore_left)
+    env_options = {"ignore_left": True} if ignore_left else {}
+    env = make_real_env(init_node=False, setup_robots=False, **env_options)
+    masters = [bot for bot in (master_bot_left, master_bot_right) if bot is not None]
+    puppets = [(bot, opening) for bot, opening in (
+        (env.puppet_bot_left, PUPPET_LEFT_GRIPPER_JOINT_OPEN),
+        (env.puppet_bot_right, PUPPET_RIGHT_GRIPPER_JOINT_OPEN)) if bot is not None]
 
     # saving dataset
     if not os.path.isdir(dataset_dir):
@@ -497,7 +461,6 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
         print(f'Dataset already exist at \n{dataset_path}\nHint: set overwrite to True.')
         exit()
 
-    haptics_args = haptics_args or {}
     start_open_ratio = haptics_args.get("start_open_ratio", DEFAULT_START_OPEN_RATIO)
     baseline_samples = haptics_args.get("force_baseline_samples", DEFAULT_FORCE_BASELINE_SAMPLES)
 
@@ -512,6 +475,8 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
     try:
         if not haptics_args.get("no_force_feedback", False):
             for robot_side, master_bot in (("left", master_bot_left), ("right", master_bot_right)):
+                if master_bot is None:
+                    continue
                 feedback_config, brake_config = build_haptics_config(haptics_args, robot_side)
                 arm = ArmHaptics(master_bot, robot_side, feedback_config, brake_config,
                                  torque_gate=not haptics_args.get("no_torque_gate", False))
@@ -555,8 +520,8 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
             return "quit"
 
         # Hand both leaders over to the operator, then bring the haptics up.
-        torque_off(master_bot_left)
-        torque_off(master_bot_right)
+        for master_bot in masters:
+            torque_off(master_bot)
         for arm in haptics:
             arm.start()
         if haptics:
@@ -630,13 +595,12 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
         for arm in haptics:
             arm.restore()
         haptics.clear()
-        torque_on(master_bot_left)
-        torque_on(master_bot_right)
-        env.puppet_bot_left.dxl.robot_set_operating_modes("single", "gripper", "position")
-        env.puppet_bot_right.dxl.robot_set_operating_modes("single", "gripper", "position")
-        move_grippers([env.puppet_bot_left, env.puppet_bot_right],
-                      [PUPPET_LEFT_GRIPPER_JOINT_OPEN, PUPPET_RIGHT_GRIPPER_JOINT_OPEN],
-                      move_time=0.5)
+        for master_bot in masters:
+            torque_on(master_bot)
+        for puppet_bot, opening in puppets:
+            puppet_bot.dxl.robot_set_operating_modes("single", "gripper", "position")
+        move_grippers([bot for bot, opening in puppets],
+                      [opening for bot, opening in puppets], move_time=0.5)
 
         if decision is None:
             decision = wait_for_decision(
@@ -788,6 +752,9 @@ def capture_one_episode(dt, max_timesteps, camera_names, dataset_dir, dataset_na
         with h5py.File(dataset_path + '.hdf5', 'w', rdcc_nbytes=1024 ** 2 * 2) as root:
             root.attrs['sim'] = False
             root.attrs['compress'] = COMPRESS
+            root.attrs['active_arms'] = 'right' if ignore_left else 'left,right'
+            if ignore_left:
+                root.attrs['inactive_arm_fill'] = 'left qpos/qvel/effort/action columns 0:7 are zeros, not measurements'
             obs = root.create_group('observations')
             image = obs.create_group('images')
 
@@ -863,7 +830,7 @@ def main(args):
         if status in ("quit", "save"):
             return status
         # "redo" - chosen with LEFT, or forced by the low-fps check - records the same index again.
-        sleep_all_robots()
+        sleep_all_robots(ignore_left=args.get("ignore_left", False))
 
 
 def get_auto_index(dataset_dir, dataset_name_prefix = '', data_suffix = 'hdf5'):
@@ -909,6 +876,8 @@ if __name__ == '__main__':
     parser.add_argument('--episode_idx', action='store', type=int, help='Episode index.', default=None, required=False)
     parser.add_argument('--start_idx', action='store', type=int, help='Start index.', required=True) # @gnq
     parser.add_argument('--end_idx', action='store', type=int, help='Start index.', required=True)
+    parser.add_argument('--ignore_left', action='store_true',
+                        help='Use only the right leader/follower; zero-pad left data columns (14-D layout).')
     # Leader-gripper force feedback. On by default; the defaults come from one_side_teleop.py,
     # so retuning there carries over to recording without touching this file.
     parser.add_argument('--no_force_feedback', action='store_true',
@@ -956,7 +925,7 @@ if __name__ == '__main__':
 
         if decision == "quit":
             # ESC: nothing was written for this episode, so there is nothing to clean up.
-            shut_down_all_robots()
+            shut_down_all_robots(ignore_left=args.get("ignore_left", False))
             print(f"Aborted by ESC. The data is saved up to episode {current_episode - 1}.")
             sys.exit("Quitting the process.")
 
@@ -964,8 +933,8 @@ if __name__ == '__main__':
         print(f"Episode {current_episode} saved.")
         current_episode += 1
         if current_episode <= args['end_idx']:
-            sleep_all_robots()
+            sleep_all_robots(ignore_left=args.get("ignore_left", False))
 
-    shut_down_all_robots()
+    shut_down_all_robots(ignore_left=args.get("ignore_left", False))
     print("Completed all episodes.")
     print(f"The data is saved to {current_episode - 1} episode.")

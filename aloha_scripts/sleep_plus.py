@@ -76,40 +76,32 @@ def move_shut_robot(robot, gripper_position, arm_waypoints, move_times):
     time.sleep(0.3)
     torque_off(robot)
 
-def shut_down_all_robots():
-    # 创建机械臂实例
-    puppet_bot_left = InterbotixManipulatorXS(robot_model="vx300s", group_name="arm", gripper_name="gripper",
-                                              robot_name='puppet_left', init_node=False)
-    puppet_bot_right = InterbotixManipulatorXS(robot_model="vx300s", group_name="arm", gripper_name="gripper",
-                                               robot_name='puppet_right', init_node=False)
-    master_bot_left = InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
-                                              robot_name='master_left', init_node=False)
-    master_bot_right = InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
-                                               robot_name='master_right', init_node=False)
-
-    puppet_waypoints = (OLD_PUPPET_SLEEP_POSITION, PUPPET_SLEEP_POSITION)
-    master_waypoints = (OLD_MASTER_SLEEP_POSITION, MASTER_SLEEP_POSITION)
-    puppet_move_times = tuple(t * SHUTDOWN_SPEED_SCALE for t in (1, 1))
-    master_move_times = tuple(t * SHUTDOWN_SPEED_SCALE for t in (1, 1.5))
-
-    # 创建线程
+def _rest_all_robots(ignore_left=False, shutdown=False):
+    """Rest only the selected hardware, including when the left driver is absent."""
+    sides = ("right",) if ignore_left else ("left", "right")
+    operation = move_shut_robot if shutdown else move_robot
+    scale = SHUTDOWN_SPEED_SCALE if shutdown else 1.0
     threads = []
-    threads.append(threading.Thread(target=move_shut_robot,
-                                    args=(puppet_bot_left, PUPPET_LEFT_GRIPPER_JOINT_OPEN, puppet_waypoints, puppet_move_times)))
-    threads.append(threading.Thread(target=move_shut_robot,
-                                    args=(puppet_bot_right, PUPPET_RIGHT_GRIPPER_JOINT_OPEN, puppet_waypoints, puppet_move_times)))
-    threads.append(threading.Thread(target=move_shut_robot,
-                                    args=(master_bot_left, MASTER_LEFT_GRIPPER_JOINT_OPEN, master_waypoints, master_move_times)))
-    threads.append(threading.Thread(target=move_shut_robot,
-                                    args=(master_bot_right, MASTER_RIGHT_GRIPPER_JOINT_OPEN, master_waypoints, master_move_times)))
-
-    # 启动所有线程
+    for role, model, waypoints, durations, openings in (
+        ("puppet", "vx300s", (OLD_PUPPET_SLEEP_POSITION, PUPPET_SLEEP_POSITION), (1, 1),
+         {"left": PUPPET_LEFT_GRIPPER_JOINT_OPEN, "right": PUPPET_RIGHT_GRIPPER_JOINT_OPEN}),
+        ("master", "wx250s", (OLD_MASTER_SLEEP_POSITION, MASTER_SLEEP_POSITION), (1, 1.5),
+         {"left": MASTER_LEFT_GRIPPER_JOINT_OPEN, "right": MASTER_RIGHT_GRIPPER_JOINT_OPEN}),
+    ):
+        for side in sides:
+            bot = InterbotixManipulatorXS(robot_model=model, group_name="arm", gripper_name="gripper",
+                                         robot_name=f"{role}_{side}", init_node=False)
+            threads.append(threading.Thread(target=operation, args=(
+                bot, openings[side], waypoints, tuple(t * scale for t in durations))))
     for thread in threads:
         thread.start()
-
-    # 等待所有线程完成
     for thread in threads:
         thread.join()
+
+
+def shut_down_all_robots(ignore_left=False):
+    _rest_all_robots(ignore_left=ignore_left, shutdown=True)
+
 
 def shut_down_puppet_robots():
     # 创建机械臂实例
@@ -137,40 +129,8 @@ def shut_down_puppet_robots():
         thread.join()
 
 
-def sleep_all_robots():
-    # 创建机械臂实例
-    puppet_bot_left = InterbotixManipulatorXS(robot_model="vx300s", group_name="arm", gripper_name="gripper",
-                                              robot_name='puppet_left', init_node=False)
-    puppet_bot_right = InterbotixManipulatorXS(robot_model="vx300s", group_name="arm", gripper_name="gripper",
-                                               robot_name='puppet_right', init_node=False)
-    master_bot_left = InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
-                                              robot_name='master_left', init_node=False)
-    master_bot_right = InterbotixManipulatorXS(robot_model="wx250s", group_name="arm", gripper_name="gripper",
-                                               robot_name='master_right', init_node=False)
-
-    puppet_waypoints = (OLD_PUPPET_SLEEP_POSITION, PUPPET_SLEEP_POSITION)
-    master_waypoints = (OLD_MASTER_SLEEP_POSITION, MASTER_SLEEP_POSITION)
-    puppet_move_times = (1, 1)
-    master_move_times = (1, 1.5)
-
-    # 创建线程
-    threads = []
-    threads.append(threading.Thread(target=move_robot,
-                                    args=(puppet_bot_left, PUPPET_LEFT_GRIPPER_JOINT_OPEN, puppet_waypoints, puppet_move_times)))
-    threads.append(threading.Thread(target=move_robot,
-                                    args=(puppet_bot_right, PUPPET_RIGHT_GRIPPER_JOINT_OPEN, puppet_waypoints, puppet_move_times)))
-    threads.append(threading.Thread(target=move_robot,
-                                    args=(master_bot_left, MASTER_LEFT_GRIPPER_JOINT_OPEN, master_waypoints, master_move_times)))
-    threads.append(threading.Thread(target=move_robot,
-                                    args=(master_bot_right, MASTER_RIGHT_GRIPPER_JOINT_OPEN, master_waypoints, master_move_times)))
-
-    # 启动所有线程
-    for thread in threads:
-        thread.start()
-
-    # 等待所有线程完成
-    for thread in threads:
-        thread.join()
+def sleep_all_robots(ignore_left=False):
+    _rest_all_robots(ignore_left=ignore_left)
 
 
 def sleep_puppet_robots():

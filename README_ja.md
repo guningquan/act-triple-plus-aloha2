@@ -7,24 +7,24 @@
 
 ## 📂 リポジトリ構成
 
-| パス                                          | 用途                                                                                                                                             |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `aloha_scripts/constants.py`                | タスク設定テーブル（`TASK_CONFIGS`）、グリッパーのキャリブレーション定数、`START_ARM_POSE`、制御周期（`DT`/`FPS`）                       |
-| `aloha_scripts/test_arm_joints.py`          | 読み取り専用: 何かする前に4本のアームすべての `/joint_states` を確認する                                                                       |
-| `aloha_scripts/test_gripper_range.py`       | 読み取り専用: 各グリッパーの開閉可動域を測定し、`constants.py` のキャリブレーションに使う                                                      |
-| `aloha_scripts/one_side_teleop.py`          | 単腕または双腕のテレオペレーションテスト（記録なし）。CLIフラグでオプションのリーダーグリッパー力フィードバックを調整可能                        |
-| `aloha_scripts/check_tactile_feedback.py`   | オプションの触覚サポート: ライブ触覚ビューワー**兼**、片方のグリッパーずつ力フィードバックの感触を調整できるインタラクティブなスライダーUI |
-| `aloha_scripts/sleep_plus.py`               | アームを安全な休止姿勢に移動させる（トルクを切る/切らないを選択可）                                                                              |
-| `aloha_scripts/record_episodes_aloha2.py`   | 従来のACT形式のHDF5データセット（`episode_N.hdf5`）を記録する                                                                                  |
-| `aloha_scripts/replay_episodes.py`          | 記録済みHDF5エピソードの `/action` を実機の puppet アームで再生する（確認プロンプトなし・実際に動く）                                          |
-| `aloha_scripts/visualize_episodes_multi.py` | オフライン: qpos/qvel/effort/action の曲線をプロットし、記録済みエピソードのカメラフレームを書き出す                                             |
-| `aloha_scripts/check_episode_timing.py`     | オフライン: 記録した各ステップのカメラ・関節・触覚データがほぼ同じ時刻のものか、触覚データが新しかったかを確認する                               |
+| パス                                          | 用途                                                                                                                                                 |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `aloha_scripts/constants.py`                | タスク設定テーブル（`TASK_CONFIGS`）、グリッパーのキャリブレーション定数、`START_ARM_POSE`、制御周期（`DT`/`FPS`）                           |
+| `aloha_scripts/test_arm_joints.py`          | 読み取り専用: 何かする前に4本のアームすべての `/joint_states` を確認する                                                                           |
+| `aloha_scripts/test_gripper_range.py`       | 読み取り専用: 各グリッパーの開閉可動域を測定し、`constants.py` のキャリブレーションに使う                                                          |
+| `aloha_scripts/one_side_teleop.py`          | 単腕または双腕のテレオペレーションテスト（記録なし）。CLIフラグでオプションのリーダーグリッパー力フィードバックを調整可能                            |
+| `aloha_scripts/check_tactile_feedback.py`   | オプションの触覚サポート: ライブ触覚ビューワー**兼**、片方のグリッパーずつ力フィードバックの感触を調整できるインタラクティブなスライダーUI     |
+| `aloha_scripts/sleep_plus.py`               | アームを安全な休止姿勢に移動させる（トルクを切る/切らないを選択可）                                                                                  |
+| `aloha_scripts/record_episodes_aloha2.py`   | 従来のACT形式のHDF5データセット（`episode_N.hdf5`）を記録する                                                                                      |
+| `aloha_scripts/replay_episodes.py`          | 記録済みHDF5エピソードの `/action` を実機の puppet アームで再生する（確認プロンプトなし・実際に動く）                                              |
+| `aloha_scripts/visualize_episodes_multi.py` | オフライン: qpos/qvel/effort/action の曲線をプロットし、記録済みエピソードのカメラフレームを書き出す                                                 |
+| `aloha_scripts/check_episode_timing.py`     | オフライン: 記録した各ステップのカメラ・関節・触覚データがほぼ同じ時刻のものか、触覚データが新しかったかを確認する                                   |
 | `aloha_scripts/tactile_stream.py`           | オプションの触覚サポート: 触覚パブリッシャーのトピックの共有リーダー（データ年齢の判定、ゼロ点校正サービス、runtime config）。単体のコマンドではない |
-| `detr/`                                     | モデル定義                                                                                                                                       |
-| `imitate_episodes_multi_gpu.py`             | ACT/TactileACT/Diffusion/CNNMLP ポリシーをマルチGPUで学習・評価する。実機評価にはキーボード操作（RIGHT/ESC/LEFT）あり                            |
-| `policy.py`                                 | ACT、DiffusionPolicy、CNNMLP、TactileACT 用のアダプタ                                                                                            |
-| `aloha_scripts/robot_utils.py`              | 他のスクリプトが共有して使うロボット用ユーティリティ。単体で実行するコマンドではない                                                             |
-| `utils.py`                                  | データ読み込みと学習用のヘルパー関数                                                                                                             |
+| `detr/`                                     | モデル定義                                                                                                                                           |
+| `imitate_episodes_multi_gpu.py`             | ACT/TactileACT/Diffusion/CNNMLP ポリシーをマルチGPUで学習・評価する。実機評価にはキーボード操作（RIGHT/ESC/LEFT）あり                                |
+| `policy.py`                                 | ACT、DiffusionPolicy、CNNMLP、TactileACT 用のアダプタ                                                                                                |
+| `aloha_scripts/robot_utils.py`              | 他のスクリプトが共有して使うロボット用ユーティリティ。単体で実行するコマンドではない                                                                 |
+| `utils.py`                                  | データ読み込みと学習用のヘルパー関数                                                                                                                 |
 
 ---
 
@@ -61,7 +61,7 @@
 
 ```sh
 # ROSターミナル
-source /opt/ros/noetic/setup.sh && source ~/interbotix_ws_noetic/devel/setup.sh
+source /opt/ros/noetic/setup.uush && source ~/interbotix_ws_noetic/devel/setup.sh
 # ここにお使いのハードウェアセットアップが提供するアーム/カメラのlaunchコマンドを実行してください。
 ```
 
@@ -239,6 +239,30 @@ python aloha_scripts/record_episodes_aloha2.py \
 force フィールドを提供していることを確認してください。生の触覚配列の記録は別途設定します。
 必要な場合のみタスク設定に `tactile_sensors` と `tactile_outputs` を追加し、触覚センサーのない
 セットアップでは外しておいてください。
+
+左アームを使わず右側だけで記録する場合は、既存の4本用launchを終了し、リポジトリのルートで
+次の専用launchを起動します。右のリーダー・フォロワーと4台のカメラを起動し、左アームの
+ドライバーと触覚ノードは起動しません。
+
+```sh
+roslaunch aloha_scripts/launch/right_arm_recording.launch
+```
+
+別ターミナルで記録します。
+
+```sh
+python aloha_scripts/record_episodes_aloha2.py \
+    --task_name not_picking_w_cover --start_idx 0 --end_idx 9 \
+    --ignore_left --no_force_feedback
+```
+
+`--ignore_left` は、記録・再記録・終了時も左のリーダーとフォロワーに接続しません。
+HDF5の `qpos`・`qvel`・`effort`・`action` は従来の14次元で、先頭7次元をゼロ埋めします。
+これは左側の実測値ではありません。ファイル属性 `active_arms="right"` と
+`inactive_arm_fill` にそのことを記録し、左関節のタイムスタンプはNaNになります。
+このデータを使ったポリシーを両腕にそのまま実行しないでください。カメラはタスク設定どおりなので、
+左手首カメラも記録対象です。触覚記録の設定がある場合は左センサーだけを除外するため、
+右センサーも使わないときはタスク設定から触覚記録を外してください。
 
 触覚センサーを使う場合（力フィードバック、またはタスク設定に `tactile_sensors` がある場合）:
 
